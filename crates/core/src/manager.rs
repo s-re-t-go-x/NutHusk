@@ -1,5 +1,5 @@
 use crate::layout::is_writable;
-use crate::manifest::{is_plugin_local_command, CommandSpec, Manifest, Permission};
+use crate::manifest::{is_plugin_local_command, CommandSpec, Manifest, MatchSpec, Permission};
 use crate::package::{self, PackageInfo};
 use crate::runtime::{Prepared, RuntimeManager, MISSING_PREFIX};
 use crate::signature::{self, Trust, TrustedKey, SIGNATURE_FILE};
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
@@ -70,10 +70,16 @@ pub struct PluginInfo {
     pub keywords: Vec<String>,
     pub ui: Option<String>,
     pub permissions: Vec<Permission>,
+    /// 智能内容匹配规则（可选）。
+    #[serde(rename = "match")]
+    pub r#match: Option<MatchSpec>,
     pub enabled: bool,
     pub error: Option<String>,
     pub has_backend: bool,
     pub backend_command: Option<String>,
+    /// 后端进程当前是否正在运行，以及其操作系统 PID。
+    pub backend_running: bool,
+    pub backend_pid: Option<u32>,
     /// 所在的目录组（"appdata" / "program"）及其名称、完整路径。
     pub group: String,
     pub group_label: String,
@@ -107,6 +113,9 @@ struct Entry {
 
 /// 一个正在运行的插件后端进程，使用按行分隔的 JSON-RPC 与宿主通信。
 struct Backend {
+    pid: Option<u32>,
+    started_at: Instant,
+    last_used_ms: AtomicU64,
     stdin: AsyncMutex<ChildStdin>,
     child: AsyncMutex<Child>,
     pending: Pending,
@@ -164,6 +173,7 @@ fn spawn_backend(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("无法启动插件后端 {}: {e}", spec.command))?;
+    let pid = child.id();
     let stdin = child.stdin.take().ok_or("无法获取插件 stdin")?;
     let stdout = child.stdout.take().ok_or("无法获取插件 stdout")?;
     let stderr = child.stderr.take().ok_or("无法获取插件 stderr")?;
@@ -214,6 +224,9 @@ fn spawn_backend(
     });
 
     Ok(Backend {
+        pid,
+        started_at: Instant::now(),
+        last_used_ms: AtomicU64::new(0),
         stdin: AsyncMutex::new(stdin),
         child: AsyncMutex::new(child),
         pending,
@@ -223,7 +236,22 @@ fn spawn_backend(
 }
 
 impl Backend {
+    fn touch(&self) {
+        let ms = self.started_at.elapsed().as_millis() as u64;
+        self.last_used_ms.store(ms, Ordering::SeqCst);
+    }
+
+    fn idle_duration(&self) -> Duration {
+        if !self.pending.lock().unwrap().is_empty() {
+            return Duration::ZERO;
+        }
+        let elapsed = self.started_at.elapsed();
+        let last = Duration::from_millis(self.last_used_ms.load(Ordering::SeqCst));
+        elapsed.saturating_sub(last)
+    }
+
     async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
+        self.touch();
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(id, tx);
@@ -246,17 +274,20 @@ impl Backend {
             return Err(format!("写入插件失败: {e}"));
         }
 
-        match tokio::time::timeout(CALL_TIMEOUT, rx).await {
+        let res = match tokio::time::timeout(CALL_TIMEOUT, rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err("插件进程已退出".into()),
             Err(_) => {
                 self.pending.lock().unwrap().remove(&id);
                 Err("插件响应超时".into())
             }
-        }
+        };
+        self.touch();
+        res
     }
 
     async fn kill(&self) {
+        self.alive.store(false, Ordering::SeqCst);
         let _ = self.child.lock().await.kill().await;
     }
 }
@@ -267,7 +298,7 @@ pub struct PluginManager {
     trusted: Vec<TrustedKey>,
     entries: RwLock<HashMap<String, Entry>>,
     disabled: RwLock<HashSet<String>>,
-    running: AsyncMutex<HashMap<String, Arc<Backend>>>,
+    running: Mutex<HashMap<String, Arc<Backend>>>,
     logs: RwLock<HashMap<String, LogSink>>,
     runtimes: Option<Arc<RuntimeManager>>,
 }
@@ -290,7 +321,7 @@ impl PluginManager {
             trusted: Vec::new(),
             entries: RwLock::new(HashMap::new()),
             disabled: RwLock::new(disabled),
-            running: AsyncMutex::new(HashMap::new()),
+            running: Mutex::new(HashMap::new()),
             logs: RwLock::new(HashMap::new()),
             runtimes: None,
         }
@@ -390,7 +421,7 @@ impl PluginManager {
         let stale: Vec<String> = self
             .running
             .lock()
-            .await
+            .unwrap()
             .keys()
             .filter(|k| !present.contains(*k))
             .cloned()
@@ -412,6 +443,8 @@ impl PluginManager {
 
     pub fn list(&self) -> Vec<PluginInfo> {
         let disabled = self.disabled.read().unwrap();
+        let mut running = self.running.lock().unwrap();
+        running.retain(|_, b| b.alive.load(Ordering::SeqCst));
         let mut out: Vec<PluginInfo> = self
             .entries
             .read()
@@ -422,6 +455,10 @@ impl PluginManager {
                 let backend = m
                     .and_then(|m| m.backend.as_ref())
                     .map(|b| b.for_current_os());
+                let (backend_running, backend_pid) = running
+                    .get(&e.id)
+                    .map(|b| (true, b.pid))
+                    .unwrap_or((false, None));
                 PluginInfo {
                     id: e.id.clone(),
                     name: e.name.clone(),
@@ -432,6 +469,7 @@ impl PluginManager {
                     keywords: m.map(|m| m.keywords.clone()).unwrap_or_default(),
                     ui: m.and_then(|m| m.ui.clone()),
                     permissions: m.map(|m| m.permissions.clone()).unwrap_or_default(),
+                    r#match: m.and_then(|m| m.r#match.clone()),
                     enabled: !disabled.contains(&e.id),
                     error: e.error.clone(),
                     has_backend: backend.is_some(),
@@ -441,6 +479,8 @@ impl PluginManager {
                             .collect::<Vec<_>>()
                             .join(" ")
                     }),
+                    backend_running,
+                    backend_pid,
                     group: e.group.clone(),
                     group_label: self.group_label(&e.group),
                     path: e.dir.display().to_string(),
@@ -597,12 +637,12 @@ impl PluginManager {
         if self.disabled.read().unwrap().contains(id) {
             return Err("插件已禁用".into());
         }
-        let backend = self.get_or_start(id, &dir, &spec).await?;
+        let backend = self.get_or_start(id, &dir, &spec)?;
         backend.call(method, params).await
     }
 
-    async fn get_or_start(&self, id: &str, dir: &Path, spec: &CommandSpec) -> Result<Arc<Backend>, String> {
-        let mut running = self.running.lock().await;
+    fn get_or_start(&self, id: &str, dir: &Path, spec: &CommandSpec) -> Result<Arc<Backend>, String> {
+        let mut running = self.running.lock().unwrap();
         if let Some(b) = running.get(id) {
             if b.alive.load(Ordering::SeqCst) {
                 return Ok(b.clone());
@@ -631,17 +671,49 @@ impl PluginManager {
     }
 
     pub async fn stop(&self, id: &str) {
-        let backend = self.running.lock().await.remove(id);
+        let backend = self.running.lock().unwrap().remove(id);
         if let Some(b) = backend {
             b.kill().await;
         }
     }
 
-    pub async fn stop_all(&self) {
-        let all: Vec<Arc<Backend>> = self.running.lock().await.drain().map(|(_, b)| b).collect();
+    pub async fn stop_all(&self) -> usize {
+        let all: Vec<Arc<Backend>> = self
+            .running
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, b)| b)
+            .filter(|b| b.alive.load(Ordering::SeqCst))
+            .collect();
+        let count = all.len();
         for b in all {
             b.kill().await;
         }
+        count
+    }
+
+    /// 结束闲置时间超过 `max_idle` 的后端进程，返回被停止的插件 ID 列表。
+    pub async fn reap_idle(&self, max_idle: Duration) -> Vec<String> {
+        let idle: Vec<(String, Arc<Backend>)> = {
+            let mut running = self.running.lock().unwrap();
+            running.retain(|_, b| b.alive.load(Ordering::SeqCst));
+            let ids: Vec<String> = running
+                .iter()
+                .filter(|(_, b)| b.idle_duration() >= max_idle)
+                .map(|(k, _)| k.clone())
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| running.remove(&id).map(|b| (id, b)))
+                .collect()
+        };
+        let mut stopped = Vec::with_capacity(idle.len());
+        for (id, b) in idle {
+            push_log(&self.sink(&id), "[宿主] 后端闲置超时，已自动休眠");
+            b.kill().await;
+            stopped.push(id);
+        }
+        stopped
     }
 
     /* ---------- 插件包：检查 / 安装 / 卸载 ---------- */

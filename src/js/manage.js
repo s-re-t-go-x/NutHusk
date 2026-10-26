@@ -1,7 +1,7 @@
 import { el, badge, icon, switchEl, trustTag, PERM_LABEL } from './util.js';
 import { filterPlugins } from './state.js';
 
-const FILTERS = [['all', '全部'], ['enabled', '已启用'], ['disabled', '已禁用'], ['error', '加载失败']];
+const FILTERS = [['all', '全部'], ['enabled', '已启用'], ['disabled', '已禁用'], ['running', '运行中'], ['error', '加载失败']];
 
 function logPanel(p, app, actions) {
   const lines = app.manage.logs.get(p.id);
@@ -27,6 +27,11 @@ function row(p, app, actions) {
           el('b', { textContent: p.name }),
           el('span', { class: 'muted small', textContent: `v${p.version}` }),
           trustTag(p.trust),
+          p.backendRunning ? el('span', {
+            class: 'tag ok',
+            title: p.backendPid ? `后端进程运行中（PID: ${p.backendPid}）` : '后端进程运行中',
+            textContent: p.backendPid ? `运行中 · PID ${p.backendPid}` : '运行中',
+          }) : null,
           p.error ? el('span', { class: 'tag err', textContent: '加载失败' }) : null),
         el('div', { class: 'muted small', textContent: p.error ?? p.description }),
         el('div', { class: 'mrow-tags' },
@@ -36,6 +41,7 @@ function row(p, app, actions) {
           p.shadowed.length ? el('span', { class: 'tag', title: p.shadowed.join('\n'), textContent: `覆盖了另一目录中的同名插件` }) : null),
         el('div', { class: 'muted small mrow-path', textContent: p.path })),
       el('div', { class: 'mrow-actions' },
+        p.backendRunning ? el('button', { class: 'btn sm', type: 'button', textContent: '停止后端', onclick: () => actions.stopBackend(p.id) }) : null,
         canLog ? el('button', { class: 'btn sm', type: 'button', textContent: logsOpen ? '收起日志' : '日志', onclick: () => actions.toggleLogs(p.id) }) : null,
         el('button', { class: 'btn sm danger', type: 'button', textContent: '卸载', onclick: () => actions.uninstall(p) }),
         switchEl({
@@ -52,6 +58,7 @@ export function renderManage(root, app, actions) {
   const m = app.manage;
   const total = app.plugins.length;
   const bad = app.plugins.filter((p) => p.error).length;
+  const running = app.plugins.filter((p) => p.backendRunning).length;
 
   const listEl = el('div', { class: 'mlist' });
   const drawList = () => {
@@ -68,7 +75,7 @@ export function renderManage(root, app, actions) {
   const chips = el('div', { class: 'mchips' }, ...FILTERS.map(([key, label]) => el('button', {
     class: 'mchip' + (m.filter === key ? ' active' : ''),
     type: 'button',
-    textContent: label + (key === 'error' && bad ? ` ${bad}` : ''),
+    textContent: label + (key === 'error' && bad ? ` ${bad}` : '') + (key === 'running' && running ? ` ${running}` : ''),
     onclick: () => { m.filter = key; renderManage(root, app, actions); },
   })));
 
@@ -76,8 +83,9 @@ export function renderManage(root, app, actions) {
     el('div', { class: 'mhead' },
       el('div', {},
         el('h2', { class: 'mtitle', textContent: '插件管理' }),
-        el('div', { class: 'muted small', textContent: `共 ${total} 个插件` + (bad ? `，${bad} 个加载失败` : '') })),
+        el('div', { class: 'muted small', textContent: `共 ${total} 个插件` + (running ? `，${running} 个后端运行中` : '') + (bad ? `，${bad} 个加载失败` : '') })),
       el('div', { class: 'mbtns' },
+        running ? el('button', { class: 'btn', type: 'button', textContent: `停止所有后端 (${running})`, onclick: () => actions.stopAllBackends() }) : null,
         el('button', { class: 'btn', type: 'button', onclick: () => actions.rescan() }, icon('refresh', 14), ' 重新扫描'),
         el('button', { class: 'btn primary', type: 'button', textContent: '导入插件包…', onclick: () => actions.pickAndImport() }))),
     el('div', { class: 'dropzone', textContent: '把 .nut 插件包拖进窗口即可导入（在首页或本页）。安装前会先让你确认来源和权限，不会直接安装。' }),

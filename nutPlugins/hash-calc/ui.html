@@ -12,6 +12,7 @@
         <select id="algo"><option>sha256</option><option>sha1</option><option>sha512</option><option>md5</option></select>
       </label>
       <span class="nh-spacer"></span>
+      <button id="send" class="small">投递结果…</button>
       <button id="copy" class="small">复制结果</button>
     </div>
     <section class="nh-pane" style="flex:1">
@@ -47,6 +48,17 @@
       sel.removeAllRanges();
       setStatus(ok ? 'ok' : '', ok ? '已复制' : '复制失败，请手动选中后按 Ctrl+C');
     };
+    $('send').onclick = function () {
+      var text = $('out').textContent || $('text').value;
+      if (!text.trim()) { setStatus('', '没有可投递的内容'); return; }
+      if (window.nuthusk && nuthusk.sendTo) nuthusk.sendTo(text);
+    };
+    if (window.nuthusk && nuthusk.onInput) {
+      nuthusk.onInput(function (text) {
+        $('text').value = text;
+        $('go').click();
+      });
+    }
   </script>
 </body>
 </html>

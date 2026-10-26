@@ -15,8 +15,13 @@ function load(relPath, nuthusk = null) {
   return { w, $ };
 }
 
-test('JSON 格式化：格式化 / 压缩 / 校验 / 缩进 / 错误提示 / 清空', () => {
-  const { $ } = load('../nutPlugins/json-formatter/ui.html');
+test('JSON 格式化：格式化 / 压缩 / 校验 / 缩进 / 错误提示 / 清空 / 接收投递 / 投递结果', () => {
+  let onInputCb = null;
+  const sentTo = [];
+  const { $ } = load('../nutPlugins/json-formatter/ui.html', {
+    onInput: (fn) => { onInputCb = fn; },
+    sendTo: (text) => { sentTo.push(text); },
+  });
   const click = (id) => $(id).click();
 
   $('input').value = '{"name":"nuthusk","list":[1,2],"ok":true}';
@@ -25,15 +30,24 @@ test('JSON 格式化：格式化 / 压缩 / 校验 / 缩进 / 错误提示 / 清
   assert.ok($('status').classList.contains('ok') && $('status').textContent.includes('JSON 格式正确'));
   assert.ok($('status').textContent.includes('输入 41 字符') && $('status').textContent.includes('耗时'));
 
+  click('send');
+  assert.equal(sentTo.length, 1);
+  assert.ok(sentTo[0].includes('"nuthusk"'));
+
+  // 宿主通过 nuthusk.onInput 投递一段 JSON 时自动填入并格式化
+  assert.equal(typeof onInputCb, 'function');
+  onInputCb('{"auto":123}', { text: '{"auto":123}' });
+  assert.equal($('output').value, '{\n  "auto": 123\n}');
+
   $('indent').value = '4';
   click('fmt');
-  assert.ok($('output').value.includes('\n    "name"'));
+  assert.ok($('output').value.includes('\n    "auto"'));
   $('indent').value = 'tab';
   click('fmt');
-  assert.ok($('output').value.includes('\n\t"name"'));
+  assert.ok($('output').value.includes('\n\t"auto"'));
 
   click('min');
-  assert.equal($('output').value, '{"name":"nuthusk","list":[1,2],"ok":true}');
+  assert.equal($('output').value, '{"auto":123}');
 
   const before = $('output').value;
   click('chk');
@@ -86,14 +100,18 @@ test('UUID 生成器：数量、格式、大写、上限', () => {
   assert.equal($('out').value.split('\n').length, 1);
 });
 
-test('哈希计算：调用后端并显示结果；后端出错时显示错误', async () => {
+test('哈希计算：调用后端、接收投递自动计算、投递结果；后端出错时显示错误', async () => {
   const calls = [];
+  let onInputCb = null;
+  const sentTo = [];
   const { $ } = load('../nutPlugins/hash-calc/ui.html', {
     call: async (method, params) => {
       calls.push([method, params]);
       if (params.algo === 'md5') throw new Error('不支持的算法: md5');
       return 'deadbeef';
     },
+    onInput: (fn) => { onInputCb = fn; },
+    sendTo: (text) => { sentTo.push(text); },
   });
   $('text').value = 'abc';
   $('go').click();
@@ -101,6 +119,14 @@ test('哈希计算：调用后端并显示结果；后端出错时显示错误',
   assert.equal(JSON.stringify(calls[0]), JSON.stringify(['hash', { text: 'abc', algo: 'sha256' }])); // 跨 jsdom/Node 环境，按 JSON 比较
   assert.equal($('out').textContent, 'deadbeef');
   assert.ok($('status').classList.contains('ok'));
+
+  $('send').click();
+  assert.deepEqual(sentTo, ['deadbeef']);
+
+  assert.equal(typeof onInputCb, 'function');
+  onInputCb('from-handoff', { text: 'from-handoff' });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(JSON.stringify(calls[1]), JSON.stringify(['hash', { text: 'from-handoff', algo: 'sha256' }]));
 
   $('algo').value = 'md5';
   $('go').click();

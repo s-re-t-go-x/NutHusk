@@ -44,9 +44,10 @@ kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--border); borde
 .searchbtn { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--muted); text-align: left; }
 .searchbtn:hover { border-color: var(--accent); }
 .searchbtn-text { flex: 1; }
-.topbar-right { justify-self: end; }
+.topbar-right { justify-self: end; display: flex; align-items: center; gap: 4px; }
 .iconbtn { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 8px; background: none; color: var(--muted); }
 .iconbtn:hover { background: var(--hover); color: var(--text); }
+.iconbtn.active { background: var(--accent-bg); color: var(--accent); }
 
 #body { flex: 1; display: flex; min-height: 0; }
 
@@ -65,9 +66,12 @@ kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--border); borde
 /* ---------- 标签页 ---------- */
 #main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 #tabs { display: flex; gap: 2px; padding: 6px 8px 0; border-bottom: 1px solid var(--border); background: var(--surface); overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
-.tab { display: flex; align-items: center; gap: 6px; max-width: 200px; padding: 6px 8px 6px 10px; border: 1px solid transparent; border-bottom: 0; border-radius: 8px 8px 0 0; color: var(--muted); cursor: pointer; flex: none; margin-bottom: -1px; }
+.tab { display: flex; align-items: center; gap: 6px; max-width: 200px; padding: 6px 8px 6px 10px; border: 1px solid transparent; border-bottom: 0; border-radius: 8px 8px 0 0; color: var(--muted); cursor: pointer; flex: none; margin-bottom: -1px; user-select: none; }
 .tab:hover { background: var(--hover); }
 .tab.active { background: var(--bg); border-color: var(--border); color: var(--text); }
+.tab.split { border-bottom: 2px solid var(--accent); color: var(--text); }
+.tab.dragging { opacity: .45; }
+.tab.drag-over { border-color: var(--accent); background: var(--accent-bg); }
 .tab-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tab-close { width: 18px; height: 18px; line-height: 16px; padding: 0; border: 0; border-radius: 4px; background: none; color: var(--muted); }
 .tab-close:hover { background: var(--hover); color: var(--text); }
@@ -77,15 +81,18 @@ kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--border); borde
 .th-text { flex: 1; min-width: 0; }
 .th-name { font-weight: 600; }
 .th-desc { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.th-split-box { display: inline-flex; align-items: center; gap: 6px; padding: 2px 6px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); font-size: 12px; }
 .star { border: 0; background: none; font-size: 16px; line-height: 1; color: var(--muted); padding: 4px 6px; border-radius: 6px; }
 .star:hover { background: var(--hover); }
 .star.on { color: #f59e0b; }
 
-/* ---------- 舞台 ---------- */
+/* ---------- 舞台（含左右双栏分屏模式） ---------- */
 #stage { position: relative; flex: 1; min-height: 0; }
-#home, #manage, #settings { position: absolute; inset: 0; overflow: auto; padding: 20px 24px 32px; }
+#home, #download, #manage, #settings { position: absolute; inset: 0; overflow: auto; padding: 20px 24px 32px; }
 .frame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: none; background: var(--bg); }
 .frame.active { display: block; }
+#stage.split-mode .frame.active { right: 50%; width: 50%; border-right: 1px solid var(--border); }
+#stage.split-mode .frame.split { display: block; left: 50%; width: 50%; }
 
 /* ---------- 首页 ---------- */
 .sec { margin-bottom: 26px; }
@@ -111,6 +118,7 @@ kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--border); borde
 .tag { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--hover); color: var(--muted); }
 .tag.warn { background: var(--warn-bg); color: var(--warn); }
 .tag.err { background: var(--danger-bg); color: var(--danger); }
+.tag.ok { background: var(--ok-bg); color: var(--ok); }
 .tag.trust-trusted { background: var(--ok-bg); color: var(--ok); }
 .tag.trust-unverified { background: var(--warn-bg); color: var(--warn); }
 .tag.trust-invalid { background: var(--danger-bg); color: var(--danger); }
@@ -143,6 +151,8 @@ kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--border); borde
 /* ---------- 命令面板 ---------- */
 .pal-overlay { position: fixed; inset: 0; z-index: 10; display: flex; justify-content: center; align-items: flex-start; padding-top: 12vh; background: #0005; }
 .pal-panel { width: min(560px, 92vw); border: 1px solid var(--border); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); overflow: hidden; }
+.pal-banner { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--border); background: var(--hover); font-size: 12px; }
+.pal-banner-text { flex: 1; min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pal-input { width: 100%; padding: 14px 16px; border: 0; border-bottom: 1px solid var(--border); background: none; color: var(--text); font: inherit; font-size: 15px; outline: none; }
 .pal-list { max-height: 50vh; overflow: auto; padding: 6px; }
 .pal-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; cursor: pointer; }
@@ -157,6 +167,8 @@ kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--border); borde
 #status .st-right { display: flex; align-items: center; gap: 10px; }
 #status .st-sep { width: 1px; height: 10px; background: var(--border-strong); }
 #status .st-warn { color: var(--warn); }
+#status .st-ok { color: var(--ok); }
+#status .st-btn { border: 0; background: none; color: var(--accent); padding: 0 4px; font: inherit; text-decoration: underline; }
 .toast { position: fixed; left: 50%; bottom: 40px; transform: translateX(-50%); z-index: 50; max-width: 80vw; padding: 8px 14px; border-radius: 8px; background: var(--text); color: var(--bg); box-shadow: var(--shadow); }
 
 /* ---------- 页面通用（插件管理 / 设置） ---------- */
@@ -246,4 +258,3 @@ kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--border); borde
 .card-author { font-size: 12px; color: var(--muted); }
 .input-text { width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; box-sizing: border-box; }
 .input-text:focus { border-color: var(--accent); outline: none; }
-

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Component, Path};
 
 /// 宿主 API 版本。发布后要长期兼容，只做加法。
-pub const HOST_API_VERSION: &str = "1.0.0";
+pub const HOST_API_VERSION: &str = "1.1.0";
 
 /// 插件图标允许的图片格式。
 pub const ICON_EXTENSIONS: [&str; 7] = ["png", "svg", "jpg", "jpeg", "webp", "gif", "ico"];
@@ -53,7 +53,10 @@ impl BackendSpec {
             .cloned()
             .collect();
         if let Some(c) = &self.command {
-            v.push(CommandSpec { command: c.clone(), args: self.args.clone() });
+            v.push(CommandSpec {
+                command: c.clone(),
+                args: self.args.clone(),
+            });
         }
         v
     }
@@ -67,15 +70,40 @@ impl BackendSpec {
             _ => None,
         };
         specific.or_else(|| {
-            self.command
-                .as_ref()
-                .map(|c| CommandSpec { command: c.clone(), args: self.args.clone() })
+            self.command.as_ref().map(|c| CommandSpec {
+                command: c.clone(),
+                args: self.args.clone(),
+            })
         })
     }
 
     pub fn for_current_os(&self) -> Option<CommandSpec> {
         self.for_os(std::env::consts::OS)
     }
+}
+
+/// 智能内容匹配规则：声明插件可自动识别并处理的文本特征或文件扩展名。
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchSpec {
+    /// 正则表达式列表（用于匹配粘贴或输入的文本）。
+    #[serde(default)]
+    pub regex: Vec<String>,
+    /// 文本前缀列表（不区分大小写，如 ["eyJ", "https://"]）。
+    #[serde(default)]
+    pub prefixes: Vec<String>,
+    /// 可处理的文件扩展名列表（不含点，小写，如 ["json", "png"]）。
+    #[serde(default)]
+    pub extensions: Vec<String>,
+    /// 匹配文本的最小字符长度。
+    #[serde(default)]
+    pub min_length: Option<usize>,
+    /// 匹配文本的最大字符长度。
+    #[serde(default)]
+    pub max_length: Option<usize>,
+    /// 命中规则时的推荐提示语（如 "识别为 JSON 文本"）。
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -98,6 +126,9 @@ pub struct Manifest {
     pub backend: Option<BackendSpec>,
     #[serde(default)]
     pub permissions: Vec<Permission>,
+    /// 智能内容匹配规则（可选，宿主 API 1.1.0 新增）。
+    #[serde(default, rename = "match")]
+    pub r#match: Option<MatchSpec>,
 }
 
 fn default_category() -> String {
@@ -108,14 +139,17 @@ fn valid_id(id: &str) -> bool {
     let parts: Vec<&str> = id.split('.').collect();
     parts.len() >= 2
         && parts.iter().all(|p| {
-            !p.is_empty() && p.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            !p.is_empty()
+                && p.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
         })
 }
 
 /// 相对路径必须只含普通路径段，不允许 `..`、绝对路径等。
 pub fn is_safe_relative(p: &str) -> bool {
     let path = Path::new(p);
-    path.components().next().is_some() && path.components().all(|c| matches!(c, Component::Normal(_)))
+    path.components().next().is_some()
+        && path.components().all(|c| matches!(c, Component::Normal(_)))
 }
 
 pub fn is_plugin_local_command(cmd: &str) -> bool {
@@ -133,7 +167,10 @@ pub fn has_icon_extension(p: &str) -> bool {
 impl Manifest {
     pub fn validate(&self) -> Result<(), String> {
         if !valid_id(&self.id) {
-            return Err(format!("id 不合法: {}（应形如 com.example.my-tool）", self.id));
+            return Err(format!(
+                "id 不合法: {}（应形如 com.example.my-tool）",
+                self.id
+            ));
         }
         if self.name.trim().is_empty() {
             return Err("name 不能为空".into());
@@ -167,6 +204,34 @@ impl Manifest {
                 }
             }
         }
+        if let Some(m) = &self.r#match {
+            if let (Some(min), Some(max)) = (m.min_length, m.max_length) {
+                if min > max {
+                    return Err("match.minLength 不能大于 match.maxLength".into());
+                }
+            }
+            for pat in &m.regex {
+                if pat.trim().is_empty() || pat.len() > 512 {
+                    return Err("match.regex 不能为空或超过 512 字符".into());
+                }
+            }
+            for pfx in &m.prefixes {
+                if pfx.is_empty() {
+                    return Err("match.prefixes 不能为空字符串".into());
+                }
+            }
+            for ext in &m.extensions {
+                if ext.is_empty()
+                    || !ext
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                {
+                    return Err(format!(
+                        "match.extensions 不合法（只需写扩展名本身，不含点）: {ext}"
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -175,11 +240,17 @@ impl Manifest {
         let req = VersionReq::parse(&self.api_version).map_err(|e| e.to_string())?;
         let host = Version::parse(HOST_API_VERSION).map_err(|e| e.to_string())?;
         if !req.matches(&host) {
-            return Err(format!("需要宿主 API {}，当前为 {}", self.api_version, HOST_API_VERSION));
+            return Err(format!(
+                "需要宿主 API {}，当前为 {}",
+                self.api_version, HOST_API_VERSION
+            ));
         }
         if let Some(b) = &self.backend {
             if b.for_current_os().is_none() {
-                return Err(format!("该插件没有适用于当前系统（{}）的后端", std::env::consts::OS));
+                return Err(format!(
+                    "该插件没有适用于当前系统（{}）的后端",
+                    std::env::consts::OS
+                ));
             }
         }
         Ok(())

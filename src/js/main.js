@@ -7,6 +7,7 @@ import { renderDownload, createDownloadState } from './download.js';
 import { openPalette } from './palette.js';
 import { showDialog, isDialogOpen, closeActiveDialog } from './dialog.js';
 import { importPackages, importDroppedFiles } from './importer.js';
+import { applyProfile } from './profile.js';
 
 const { invoke } = window.__TAURI__.core;
 const { HOME, DOWNLOAD, MANAGE, SETTINGS } = S;
@@ -24,8 +25,11 @@ const app = {
   recent: S.loadListWithFallback(localStorage, 'nuthusk.recent', 'toolbox.recent'),
   tabs: [HOME],
   active: HOME,
+  splitId: null, // 右侧双栏分屏中并排展示的插件 id
   homeFilter: 'all', // 'all' | 'favorites' | 'recent' | 'cat:<分类名>'
   frames: new Map(), // 插件 id -> iframe（标签切换时保留，不丢失工具里的状态）
+  loadedFrames: new Set(), // 已触发过 load 的插件 id
+  pendingInputs: new Map(), // 插件 id -> 尚未派发的带内容打开 payload
   manage: { filter: 'all', query: '', openLogs: new Set(), logs: new Map() },
   downloadState: createDownloadState(),
   runtimes: [],
@@ -49,7 +53,7 @@ const statusEl = $('status');
 const byId = (id) => app.plugins.find((p) => p.id === id);
 const isUsable = (p) => p && p.enabled && !p.error;
 
-/* ---------- 主题 ---------- */
+/* ---------- 主题与顶栏 ---------- */
 
 const darkQuery = window.matchMedia?.('(prefers-color-scheme: dark)');
 const effectiveTheme = () => (app.settings.theme === 'system' ? (darkQuery?.matches ? 'dark' : 'light') : app.settings.theme);
@@ -72,23 +76,52 @@ function renderTopbar() {
   $('theme-toggle').replaceChildren(icon(dark ? 'moon' : 'sun', 17));
   $('theme-toggle').title = dark ? '当前为深色，点击切换为浅色' : '当前为浅色，点击切换为深色';
   $('theme-toggle').setAttribute('aria-label', '切换亮/暗主题');
+
+  const pinBtn = $('pin-toggle');
+  if (pinBtn) {
+    const pinned = !!app.settings.alwaysOnTop;
+    pinBtn.replaceChildren(icon('pin', 16));
+    pinBtn.classList.toggle('active', pinned);
+    pinBtn.title = pinned ? '窗口已置顶，点击取消置顶' : '将窗口固定在最前端（窗口置顶）';
+    pinBtn.setAttribute('aria-label', '切换窗口置顶');
+    pinBtn.setAttribute('aria-pressed', String(pinned));
+  }
   if (!$('search-icon').firstChild) $('search-icon').append(icon('search', 15));
 }
 
 darkQuery?.addEventListener?.('change', renderTopbar);
 
-/* ---------- 标签与插件界面 ---------- */
+/* ---------- 标签、插件界面与双栏分屏 ---------- */
 
 function createFrame(p) {
   const frame = el('iframe', { class: 'frame', title: p.name });
   frame.setAttribute('sandbox', 'allow-scripts'); // 不加 allow-same-origin：插件拿不到宿主任何权限
-  frame.addEventListener('load', () => sendTheme(frame));
+  frame.addEventListener('load', () => {
+    app.loadedFrames.add(p.id);
+    sendTheme(frame);
+    if (app.pendingInputs.has(p.id)) {
+      const payload = app.pendingInputs.get(p.id);
+      app.pendingInputs.delete(p.id);
+      frame.contentWindow?.postMessage({ type: 'input', payload }, '*');
+    }
+  });
   frame.src = pluginUrl(p.id, p.ui);
   stageEl.append(frame);
   app.frames.set(p.id, frame);
 }
 
-function openPlugin(id) {
+function deliverInputToPlugin(id, rawPayload) {
+  if (!rawPayload) return;
+  const payload = typeof rawPayload === 'string' ? { text: rawPayload } : rawPayload;
+  const frame = app.frames.get(id);
+  if (frame && app.loadedFrames.has(id)) {
+    frame.contentWindow?.postMessage({ type: 'input', payload }, '*');
+  } else {
+    app.pendingInputs.set(id, payload);
+  }
+}
+
+function openPlugin(id, inputPayload = null) {
   const p = byId(id);
   if (!p) return;
   if (p.error) return toast(`${p.name} 无法加载：${p.error}`);
@@ -97,28 +130,121 @@ function openPlugin(id) {
 
   app.tabs = S.openTab(app.tabs, id);
   if (!app.frames.has(id)) createFrame(p);
+  if (inputPayload) deliverInputToPlugin(id, inputPayload);
   app.recent = S.pushRecent(app.recent, id);
   S.saveList(localStorage, 'nuthusk.recent', app.recent);
   activate(id);
+}
+
+/** 在右侧双栏分屏中打开或切换指定插件（不切换主标签）。 */
+function setSplit(id, inputPayload = null) {
+  if (!id || isPage(id) || id === app.active) {
+    app.splitId = null;
+    renderAll();
+    return;
+  }
+  const p = byId(id);
+  if (!p || p.error || !p.enabled || !p.ui) return;
+  app.tabs = S.openTab(app.tabs, id);
+  if (!app.frames.has(id)) createFrame(p);
+  if (inputPayload) deliverInputToPlugin(id, inputPayload);
+  app.splitId = id;
+  renderAll();
+}
+
+function closeSplit() {
+  if (!app.splitId) return;
+  app.splitId = null;
+  renderAll();
+}
+
+function swapSplit() {
+  if (!app.splitId || isPage(app.active)) return;
+  const prevActive = app.active;
+  app.active = app.splitId;
+  app.splitId = prevActive;
+  renderAll();
+}
+
+function toggleSplitPicker() {
+  if (isPage(app.active)) return toast('请先打开一个工具，再使用左右分屏');
+  if (app.splitId) {
+    closeSplit();
+    return;
+  }
+  openPalette({
+    plugins: app.plugins,
+    favorites: app.favorites,
+    recent: app.recent,
+    mode: 'split',
+    activeId: app.active,
+    onOpen: (targetId) => setSplit(targetId),
+  });
+}
+
+function restoreWorkspace(ws) {
+  if (!ws || typeof ws !== 'object') return;
+  if (Array.isArray(ws.favorites)) {
+    app.favorites = ws.favorites.filter((id) => typeof id === 'string');
+    S.saveList(localStorage, 'nuthusk.favorites', app.favorites);
+  }
+  if (Array.isArray(ws.tabs) && ws.tabs.length) {
+    for (const id of ws.tabs) {
+      if (isPage(id)) {
+        app.tabs = S.openTab(app.tabs, id);
+      } else {
+        const p = byId(id);
+        if (isUsable(p) && p.ui) {
+          app.tabs = S.openTab(app.tabs, id);
+          if (!app.frames.has(id)) createFrame(p);
+        }
+      }
+    }
+  }
+  if (typeof ws.active === 'string' && app.tabs.includes(ws.active)) {
+    app.active = ws.active;
+  }
+  if (typeof ws.splitId === 'string' && ws.splitId !== app.active) {
+    const sp = byId(ws.splitId);
+    if (isUsable(sp) && sp.ui) {
+      app.tabs = S.openTab(app.tabs, ws.splitId);
+      if (!app.frames.has(ws.splitId)) createFrame(sp);
+      app.splitId = ws.splitId;
+    }
+  }
+  applyTheme();
+  renderAll();
 }
 
 function dropTab(id) {
   const r = S.closeTab(app.tabs, app.active, id);
   app.tabs = r.tabs;
   app.active = r.active;
+  if (app.splitId === id || app.splitId === app.active) app.splitId = null;
   app.frames.get(id)?.remove();
   app.frames.delete(id);
+  app.loadedFrames.delete(id);
+  app.pendingInputs.delete(id);
 }
 
 function closeTab(id) {
+  const p = isPage(id) ? null : byId(id);
   dropTab(id);
   activate(app.active);
+  if (p && p.hasBackend && app.settings.stopOnClose) {
+    invoke('stop_plugin_backend', { id }).then(() => syncPluginStates()).catch(() => {});
+  }
 }
 
 function activate(id) {
   app.active = id;
+  if (app.splitId === id) app.splitId = null;
   renderAll();
-  if (!isPage(id)) app.frames.get(id)?.focus();
+  if (!isPage(id)) {
+    const frame = app.frames.get(id);
+    frame?.focus();
+    frame?.contentWindow?.postMessage({ type: 'focus' }, '*');
+  }
   if (id === DOWNLOAD && !app.downloadState.sources.length) {
     actions.loadMarketSources();
   }
@@ -167,41 +293,108 @@ function renderSidebar() {
     pageItem(SETTINGS, '设置', 'settings'));
 }
 
+let draggingTabId = null;
+
 function renderTabs() {
+  const inSplit = !isPage(app.active) && app.splitId && app.splitId !== app.active;
   tabsEl.replaceChildren(...app.tabs.map((id) => {
     const page = PAGE_TABS[id];
     const p = page ? null : byId(id);
     const selected = id === app.active;
+    const isSplitRight = inSplit && id === app.splitId;
+    const canDrag = id !== HOME;
     return el('div', {
-      class: 'tab' + (selected ? ' active' : ''),
+      class: 'tab' + (selected ? ' active' : '') + (isSplitRight ? ' split' : ''),
       role: 'tab',
       'aria-selected': String(selected),
       tabIndex: 0,
-      onclick: () => activate(id),
+      draggable: canDrag,
+      title: !page && !isPage(app.active) && id !== app.active ? '点击切换，按住 Shift 点击在右侧分屏并排打开' : '',
+      onclick: (e) => {
+        if (e.shiftKey && !page && !isPage(app.active) && id !== app.active) {
+          setSplit(id);
+          return;
+        }
+        activate(id);
+      },
       onauxclick: (e) => { if (e.button === 1 && id !== HOME) { e.preventDefault(); closeTab(id); } },
       onkeydown: (e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); activate(id); } },
+      ondragstart: canDrag ? (e) => {
+        draggingTabId = id;
+        e.currentTarget.classList.add('dragging');
+        if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+      } : null,
+      ondragend: canDrag ? (e) => {
+        draggingTabId = null;
+        e.currentTarget.classList.remove('dragging');
+      } : null,
+      ondragover: canDrag ? (e) => {
+        if (!draggingTabId || draggingTabId === id) return;
+        e.preventDefault();
+        e.currentTarget.classList.add('drag-over');
+      } : null,
+      ondragleave: canDrag ? (e) => {
+        e.currentTarget.classList.remove('drag-over');
+      } : null,
+      ondrop: canDrag ? (e) => {
+        e.preventDefault();
+        e.currentTarget.classList.remove('drag-over');
+        if (!draggingTabId || draggingTabId === id) return;
+        app.tabs = S.moveTab(app.tabs, draggingTabId, id);
+        draggingTabId = null;
+        renderTabs();
+      } : null,
     },
       page ? el('span', { class: 'nav-icon' }, icon(page[0], 14)) : badge(p ?? { id, name: '?' }, true),
       el('span', { class: 'tab-title', textContent: page ? page[1] : (p?.name ?? id) }),
       id !== HOME ? el('button', {
-        class: 'tab-close', type: 'button', title: '关闭（Ctrl W）', 'aria-label': '关闭',
+        class: 'tab-close', type: 'button', title: '关闭（Ctrl W / 鼠标中键）', 'aria-label': '关闭',
         textContent: '×',
         onclick: (e) => { e.stopPropagation(); closeTab(id); },
       }) : null);
   }));
 }
 
-/** 工具页顶栏：图标、名称、说明、来源标识、收藏。 */
+/** 工具页顶栏：图标、名称、说明、后端状态、左右分屏控制、来源标识、收藏。 */
 function renderToolhead() {
   const p = isPage(app.active) ? null : byId(app.active);
   toolheadEl.classList.toggle('hidden', !p);
   if (!p) return;
   const fav = app.favorites.includes(p.id);
+  const splitPlugin = app.splitId && app.splitId !== p.id ? byId(app.splitId) : null;
+
+  const splitControls = splitPlugin
+    ? el('div', { class: 'th-split-box' },
+        icon('columns', 14),
+        el('span', { textContent: `右侧：${splitPlugin.name}` }),
+        el('button', {
+          class: 'btn sm', type: 'button', title: '交换左右分屏工具', textContent: '互换',
+          onclick: () => swapSplit(),
+        }),
+        el('button', {
+          class: 'btn sm', type: 'button', title: '关闭右侧分屏（Ctrl+\\）', textContent: '退出分屏',
+          onclick: () => closeSplit(),
+        }))
+    : el('button', {
+        class: 'btn sm', type: 'button', title: '在右侧并排打开另一个工具（Ctrl+\\，或 Shift+点击标签）',
+        onclick: () => toggleSplitPicker(),
+      }, icon('columns', 13), ' 左右分屏');
+
   toolheadEl.replaceChildren(
     badge(p),
     el('div', { class: 'th-text' },
       el('div', { class: 'th-name' }, p.name, el('span', { class: 'muted small', textContent: ` v${p.version}` })),
       el('div', { class: 'th-desc', textContent: p.description })),
+    p.backendRunning ? el('span', {
+      class: 'tag ok',
+      title: p.backendPid ? `后端进程运行中（PID: ${p.backendPid}）` : '后端进程运行中',
+      textContent: p.backendPid ? `运行中 · PID ${p.backendPid}` : '运行中',
+    }) : null,
+    p.backendRunning ? el('button', {
+      class: 'btn sm', type: 'button', title: '结束当前插件的后台进程', textContent: '停止后端',
+      onclick: () => actions.stopBackend(p.id),
+    }) : null,
+    splitControls,
     trustTag(p.trust),
     el('button', {
       class: 'star' + (fav ? ' on' : ''), type: 'button',
@@ -216,7 +409,14 @@ function renderStage() {
   downloadEl.classList.toggle('hidden', app.active !== DOWNLOAD);
   manageEl.classList.toggle('hidden', app.active !== MANAGE);
   settingsEl.classList.toggle('hidden', app.active !== SETTINGS);
-  for (const [id, frame] of app.frames) frame.classList.toggle('active', id === app.active);
+
+  const inSplit = !isPage(app.active) && !!app.splitId && app.splitId !== app.active && isUsable(byId(app.splitId));
+  stageEl.classList.toggle('split-mode', inSplit);
+
+  for (const [id, frame] of app.frames) {
+    frame.classList.toggle('active', id === app.active);
+    frame.classList.toggle('split', inSplit && id === app.splitId);
+  }
   if (app.active === HOME) renderHome(homeEl, app, actions);
   if (app.active === DOWNLOAD) renderDownload(downloadEl, app, actions);
   if (app.active === MANAGE) renderManage(manageEl, app, actions);
@@ -228,9 +428,14 @@ function renderStatus() {
   const total = app.plugins.length;
   const bad = app.plugins.filter((p) => p.error).length;
   const on = app.plugins.filter(isUsable).length;
+  const running = app.plugins.filter((p) => p.backendRunning).length;
   const cur = byId(app.active);
   statusEl.replaceChildren(
-    el('span', {}, `已加载 ${total} 个插件 · 可用 ${on}`, bad ? el('span', { class: 'st-warn', textContent: ` · ${bad} 个加载失败` }) : null),
+    el('span', {},
+      `已加载 ${total} 个插件 · 可用 ${on}`,
+      bad ? el('span', { class: 'st-warn', textContent: ` · ${bad} 个加载失败` }) : null,
+      running ? el('span', { class: 'st-ok', textContent: ` · ${running} 个后端运行中 ` }) : null,
+      running ? el('button', { class: 'st-btn', type: 'button', textContent: '全部停止', onclick: () => actions.stopAllBackends() }) : null),
     el('span', { class: 'st-right' },
       cur ? el('span', { textContent: `${cur.name} v${cur.version}` }) : null,
       cur ? el('span', { class: 'st-sep' }) : null,
@@ -238,6 +443,7 @@ function renderStatus() {
 }
 
 function renderAll() {
+  renderTopbar();
   renderSidebar();
   renderTabs();
   renderStage();
@@ -254,11 +460,22 @@ async function loadDirs() {
   }
 }
 
+/** 轻量同步插件列表（主要用于更新 backendRunning / backendPid 状态，不打断管理页搜索框焦点）。 */
+async function syncPluginStates() {
+  try {
+    app.plugins = await invoke('list_plugins');
+    renderToolhead();
+    renderStatus();
+    if (app.active === MANAGE) renderManage(manageEl, app, actions);
+  } catch { /* 忽略状态刷新异常 */ }
+}
+
 async function refresh() {
   app.plugins = await invoke('list_plugins');
   for (const id of [...app.tabs]) {
     if (!isPage(id) && !isUsable(byId(id))) dropTab(id); // 被禁用、卸载或失效的插件，关闭其标签
   }
+  if (app.splitId && !isUsable(byId(app.splitId))) app.splitId = null;
   if (app.homeFilter.startsWith('cat:') && !app.plugins.some((p) => 'cat:' + p.category === app.homeFilter)) {
     app.homeFilter = 'all';
   }
@@ -271,6 +488,9 @@ async function refresh() {
 const actions = {
   open: openPlugin,
   openPage,
+  setSplit,
+  closeSplit,
+  swapSplit,
 
   toggleFavorite(id) {
     app.favorites = S.toggleItem(app.favorites, id);
@@ -285,6 +505,39 @@ const actions = {
       toast(String(err));
     }
     await refresh();
+  },
+
+  async stopBackend(id) {
+    const p = byId(id);
+    try {
+      await invoke('stop_plugin_backend', { id });
+      toast(`已停止后端：${p?.name ?? id}`);
+    } catch (err) {
+      toast(`停止后端失败：${err}`);
+    }
+    await syncPluginStates();
+  },
+
+  async stopAllBackends() {
+    try {
+      const count = await invoke('stop_all_backends');
+      toast(count ? `已停止 ${count} 个后台进程` : '当前没有运行中的后端进程');
+    } catch (err) {
+      toast(`停止失败：${err}`);
+    }
+    await syncPluginStates();
+  },
+
+  async togglePin() {
+    const next = !app.settings.alwaysOnTop;
+    try {
+      await invoke('set_always_on_top', { onTop: next });
+      app.settings = { ...app.settings, alwaysOnTop: next };
+      renderAll();
+      toast(next ? '已开启窗口置顶' : '已取消窗口置顶');
+    } catch (err) {
+      toast(`切换窗口置顶失败：${err}`);
+    }
   },
 
   openSettings() {
@@ -329,6 +582,65 @@ const actions = {
     }
     const paths = picked ? [].concat(picked) : [];
     if (paths.length) await importPackages(paths, { invoke, refresh });
+  },
+
+  async exportProfile() {
+    const dialog = window.__TAURI__.dialog;
+    let path = null;
+    if (dialog?.save) {
+      try {
+        path = await dialog.save({
+          defaultPath: 'nuthusk-workspace.nutprofile',
+          filters: [{ name: 'NutHusk 配置清单', extensions: ['nutprofile', 'json'] }],
+        });
+      } catch (err) {
+        return toast(`无法打开保存文件框：${err}`);
+      }
+      if (!path) return;
+    }
+    const workspace = {
+      favorites: app.favorites,
+      tabs: app.tabs.filter((id) => id === HOME || !isPage(id)),
+      active: isPage(app.active) ? HOME : app.active,
+      splitId: app.splitId,
+    };
+    try {
+      await invoke('export_profile', { path, name: 'NutHusk 工作台配置', workspace });
+      toast(path ? `已导出配置清单：${path}` : '已生成配置清单');
+    } catch (err) {
+      toast(`导出配置清单失败：${err}`);
+    }
+  },
+
+  async importProfile(rawProfile = null) {
+    let profileData = rawProfile;
+    if (!profileData) {
+      const dialog = window.__TAURI__.dialog;
+      if (!dialog?.open) return toast('当前环境不支持选择文件，请把 .nutprofile 清单文件直接拖进窗口');
+      let picked;
+      try {
+        picked = await dialog.open({
+          multiple: false,
+          filters: [{ name: 'NutHusk 配置清单', extensions: ['nutprofile', 'json'] }],
+        });
+      } catch (err) {
+        return toast(`无法打开文件选择框：${err}`);
+      }
+      const path = Array.isArray(picked) ? picked[0] : picked;
+      if (!path) return;
+      try {
+        profileData = await invoke('read_profile_file', { path });
+      } catch (err) {
+        return toast(`读取配置清单失败：${err}`);
+      }
+    }
+    await applyProfile(profileData, {
+      app,
+      invoke,
+      refresh,
+      importPackages,
+      restoreWorkspace,
+    });
   },
 
   async uninstall(p) {
@@ -515,10 +827,39 @@ const actions = {
   },
 };
 
-/* ---------- 快捷键 ---------- */
+/* ---------- 快捷键与投递面板 ---------- */
 
-function showPalette() {
-  openPalette({ plugins: app.plugins, favorites: app.favorites, recent: app.recent, onOpen: openPlugin });
+function showPalette(extra = {}) {
+  openPalette({
+    plugins: app.plugins,
+    favorites: app.favorites,
+    recent: app.recent,
+    activeId: app.active,
+    splitId: app.splitId,
+    onOpen: openPlugin,
+    onSendToSplit: (targetId, payload) => {
+      deliverInputToPlugin(targetId, payload);
+      toast(`已投递到右侧分屏：${byId(targetId)?.name ?? targetId}`);
+    },
+    ...extra,
+  });
+}
+
+function handleSendTo(sourceId, text, targetId = null) {
+  const s = String(text ?? '');
+  if (!s.trim()) return toast('没有可投递的内容');
+  const srcPlugin = byId(sourceId);
+  const payload = { text: s, sourceId, sourceName: srcPlugin?.name ?? sourceId };
+  if (targetId) {
+    if (app.splitId === targetId) {
+      deliverInputToPlugin(targetId, payload);
+      toast(`已投递到右侧分屏：${byId(targetId)?.name ?? targetId}`);
+    } else {
+      openPlugin(targetId, payload);
+    }
+    return;
+  }
+  showPalette({ payload });
 }
 
 function handleShortcut(e) {
@@ -526,6 +867,7 @@ function handleShortcut(e) {
   if (!(e.ctrlKey || e.metaKey)) return false;
   const k = String(e.key ?? '').toLowerCase();
   if (k === 'k') { showPalette(); return true; }
+  if (k === '\\') { toggleSplitPicker(); return true; }
   if (k === 'w' && e.ctrlKey) { if (app.active !== HOME) closeTab(app.active); return true; }
   if (/^[1-9]$/.test(k)) {
     const id = app.tabs[Number(k) - 1];
@@ -537,8 +879,9 @@ function handleShortcut(e) {
 }
 
 window.addEventListener('keydown', (e) => { if (handleShortcut(e)) e.preventDefault(); });
-$('open-palette').addEventListener('click', showPalette);
+$('open-palette').addEventListener('click', () => showPalette());
 $('theme-toggle').addEventListener('click', () => actions.patchSettings({ theme: effectiveTheme() === 'dark' ? 'light' : 'dark' }));
+$('pin-toggle')?.addEventListener('click', () => actions.togglePin());
 $('kbd-hint').textContent = /Mac/.test(navigator.platform ?? '') ? '⌘ K' : 'Ctrl K';
 
 /* ---------- 运行环境缺失处理 ---------- */
@@ -625,14 +968,16 @@ async function handleRuntimeMissing(pluginId, reqData, frame, info) {
       params: reqData.params ?? null,
     });
     frame.contentWindow?.postMessage({ reqId: reqData.reqId, result: retryResult }, '*');
+    await syncPluginStates();
     return true;
   } catch (retryErr) {
     frame.contentWindow?.postMessage({ reqId: reqData.reqId, error: String(retryErr) }, '*');
+    await syncPluginStates();
     return true;
   }
 }
 
-/* ---------- 全局下载进度监听 ---------- */
+/* ---------- 全局事件监听 ---------- */
 
 window.__TAURI__.event?.listen?.('download-progress', (e) => {
   const payload = e?.payload;
@@ -646,6 +991,10 @@ window.__TAURI__.event?.listen?.('download-progress', (e) => {
   }
 });
 
+window.__TAURI__.event?.listen?.('backends-changed', () => {
+  syncPluginStates();
+});
+
 /* ---------- 桥接：插件界面 → 壳 → Rust → 插件后端 ---------- */
 
 window.addEventListener('message', async (e) => {
@@ -655,11 +1004,14 @@ window.addEventListener('message', async (e) => {
   const d = e.data ?? {};
 
   if (d.type === 'key') { handleShortcut(d); return; } // SDK 转发的快捷键（焦点在插件内时）
+  if (d.type === 'sendTo') { handleSendTo(id, d.text, d.targetId ?? null); return; } // 插件投递数据到其他工具
   if (d.type !== 'call') return;
 
+  const wasRunning = !!byId(id)?.backendRunning;
   try {
     const result = await invoke('plugin_call', { id, method: String(d.method), params: d.params ?? null });
     frame.contentWindow?.postMessage({ reqId: d.reqId, result }, '*');
+    if (!wasRunning) await syncPluginStates();
   } catch (err) {
     const errStr = String(err);
     const rmIdx = errStr.indexOf('RuntimeMissing:');
@@ -674,10 +1026,11 @@ window.addEventListener('message', async (e) => {
       }
     }
     frame.contentWindow?.postMessage({ reqId: d.reqId, error: errStr }, '*');
+    if (!wasRunning) await syncPluginStates();
   }
 });
 
-/* ---------- 拖入插件包 ----------
+/* ---------- 拖入插件包、配置清单或可处理的文件 ----------
  * 用浏览器自带的拖放（窗口配置里已关闭 Tauri 的原生文件拖放）。事件只会到达宿主自己的界面；
  * 落在插件 iframe 上的拖放归插件自己处理，这样需要接收文件的工具（如图片压缩）不会被抢走。 */
 
@@ -706,7 +1059,20 @@ window.addEventListener('drop', (e) => {
   e.preventDefault();
   dragDepth = 0;
   dropOverlay.classList.add('hidden');
-  importDroppedFiles([...e.dataTransfer.files], { invoke, refresh });
+  importDroppedFiles([...e.dataTransfer.files], {
+    invoke,
+    refresh,
+    plugins: app.plugins,
+    onImportProfile: (text) => actions.importProfile(text),
+    onOpenFile: (payload, matched) => {
+      if (matched.length === 1) {
+        openPlugin(matched[0].id, payload);
+        toast(`已用「${matched[0].name}」打开 ${payload.fileName}`);
+      } else {
+        showPalette({ payload: { ...payload, sourceName: payload.fileName } });
+      }
+    },
+  });
 });
 
 /* ---------- 启动 ---------- */

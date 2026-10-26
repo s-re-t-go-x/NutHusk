@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDom, tick, $$, $, makeTauri, mkPlugin, mkPackage } from './helpers.js';
 import { renderSettings } from '../src/js/settings.js';
+import { parseProfile, diffProfile } from '../src/js/profile.js';
 
 const window = createDom();
 // 旧版本（改名前）留下的收藏和最近使用，启动时应被沿用
@@ -12,7 +13,14 @@ const m = makeTauri({
   plugins: [mkPlugin('com.example.a', '工具甲'), mkPlugin('com.example.b', '工具乙'), mkPlugin('com.example.c', '工具丙')],
   settings: { theme: 'dark', showRecent: true, showFavorites: true, dirOrder: ['appdata', 'program'] },
   signers: [{ name: 'NutHusk 官方', keyId: '0123456789abcdef' }],
-  packages: { '/tmp/nuthusk-drop/我的插件.nut': mkPackage('com.example.mine', '我的插件', '1.0.0') },
+  packages: {
+    '/tmp/nuthusk-drop/我的插件.nut': mkPackage('com.example.mine', '我的插件', '1.0.0'),
+    '/tmp/downloaded.nut': mkPackage('com.example.remote', '远端工具', '1.2.0', {}, mkPlugin('com.example.remote', '远端工具')),
+  },
+  marketIndex: {
+    name: '官方源',
+    entries: [{ id: 'com.example.remote', name: '远端工具', version: '1.2.0', url: 'https://github.com/nuthusk/p/remote.nut', sha256: 'a'.repeat(64) }],
+  },
 });
 window.__TAURI__ = m.tauri;
 
@@ -220,4 +228,62 @@ test('拖入超大的文件：不会读进内存', async () => {
   await tick();
   assert.ok($$('.toast').some((t) => t.textContent.includes('太大')));
   assert.equal(m.state.saved.length, saved);
+});
+
+test('配置加载清单（.nutprofile）：导出、差异计算与拖入自动下载恢复', async () => {
+  await goSettings();
+  const exportBtn = $$('#settings button').find((b) => b.textContent === '导出配置清单…');
+  assert.ok(exportBtn, '设置页提供导出配置清单按钮');
+  exportBtn.click();
+  await tick(60);
+  assert.equal(m.called('export_profile').length, 1);
+  const exported = m.state.profiles['/tmp/exported.nutprofile'];
+  assert.equal(exported.format, 'nuthusk-profile');
+  assert.equal(exported.plugins.length, 3);
+
+  // 构造一份含新插件源、缺失运行时 python、缺失插件 com.example.remote 的清单并拖入窗口
+  const incomingProfile = {
+    format: 'nuthusk-profile',
+    version: 1,
+    name: '团队前端工作台',
+    settings: { theme: 'dark', alwaysOnTop: true },
+    sources: [{ name: '团队源', url: 'https://team.example.com/index.json' }],
+    runtimes: ['python'],
+    plugins: [
+      { id: 'com.example.a', name: '工具甲', enabled: true },
+      { id: 'com.example.remote', name: '远端工具', enabled: true },
+    ],
+    workspace: {
+      favorites: ['com.example.remote'],
+      tabs: ['home', 'com.example.remote'],
+      active: 'com.example.remote',
+    },
+  };
+
+  const parsed = parseProfile(JSON.stringify(incomingProfile));
+  const diff = diffProfile(parsed, { plugins: m.state.plugins, runtimes: [], sources: [] });
+  assert.equal(diff.newSources.length, 1);
+  assert.deepEqual(diff.missingRuntimes, ['python']);
+  assert.equal(diff.missingPlugins[0].id, 'com.example.remote');
+
+  const profileBytes = new TextEncoder().encode(JSON.stringify(incomingProfile));
+  fire('drop', { files: [new window.File([profileBytes], 'team.nutprofile')] });
+  await tick(60);
+
+  // 1. 弹出配置清单同步确认框
+  assert.ok(document.querySelector('.dlg-panel').textContent.includes('团队前端工作台'));
+  dlgBtn('开始同步与恢复').click();
+  await tick(80);
+
+  // 2. 自动下载缺失插件后，弹出标准的插件包安全安装确认框
+  assert.ok(document.querySelector('.dlg-panel').textContent.includes('远端工具'));
+  dlgBtn('安装').click();
+  await tick(80);
+
+  // 验证：源已添加、运行时已安装、插件已下载并安装、工作区已恢复到新插件标签
+  assert.equal(m.called('source_add').pop()[1].url, 'https://team.example.com/index.json');
+  assert.deepEqual(m.called('runtime_install').pop()[1], { name: 'python' });
+  assert.equal(m.called('market_download').pop()[1].url, 'https://github.com/nuthusk/p/remote.nut');
+  assert.ok(m.state.plugins.some((p) => p.id === 'com.example.remote'));
+  assert.equal($$('.tab.active .tab-title')[0].textContent, '远端工具');
 });

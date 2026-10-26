@@ -29,7 +29,8 @@ export const trust = {
 
 export const mkPlugin = (id, name, extra = {}) => ({
   id, name, version: '1.0.0', description: name + ' 的说明', icon: null, category: '开发', keywords: [],
-  ui: 'ui.html', permissions: [], enabled: true, error: null, hasBackend: false, backendCommand: null,
+  ui: 'ui.html', permissions: [], match: null, enabled: true, error: null, hasBackend: false, backendCommand: null,
+  backendRunning: false, backendPid: null,
   group: 'appdata', groupLabel: 'AppData', path: `/data/plugins/${id}`, trust: trust.none, shadowed: [], ...extra,
 });
 
@@ -41,8 +42,14 @@ export const mkDirs = () => [
 /** 模拟 Tauri：记录所有调用，并在内存里维护插件、设置、目录等状态。 */
 export function makeTauri(init = {}) {
   const state = {
-    plugins: [], settings: { theme: 'system', showRecent: true, showFavorites: true, dirOrder: ['appdata', 'program'] },
-    dirs: mkDirs(), signers: [], packages: {}, saved: [], discarded: [], pick: [], version: '0.1.0', installResult: null,
+    plugins: [],
+    settings: {
+      theme: 'system', showRecent: true, showFavorites: true,
+      stopOnClose: true, idleTimeoutMinutes: 5, closeToTray: false, alwaysOnTop: false,
+      dirOrder: ['appdata', 'program'],
+    },
+    dirs: mkDirs(), signers: [], packages: {}, profiles: {}, saved: [], discarded: [], pick: [], savePath: '/tmp/exported.nutprofile',
+    version: '0.1.0', installResult: null,
     ...init,
   };
   const calls = [];
@@ -55,18 +62,36 @@ export function makeTauri(init = {}) {
           case 'reload_plugins': return state.plugins;
           case 'get_settings': return { ...state.settings };
           case 'patch_settings': Object.assign(state.settings, args.patch); return { ...state.settings };
+          case 'set_always_on_top':
+            state.settings.alwaysOnTop = !!args.onTop;
+            return state.settings.alwaysOnTop;
           case 'plugin_dirs': return state.dirs.map((d) => ({ ...d }));
           case 'set_dir_order':
-            state.dirs = args.order.map((k) => state.dirs.find((d) => d.key === k));
+            state.dirs = args.order.map((k) => state.dirs.find((d) => d.key === k)).filter(Boolean);
             state.settings.dirOrder = args.order;
             return state.dirs;
           case 'trusted_signers': return state.signers;
           case 'set_plugin_enabled': state.plugins.find((p) => p.id === args.id).enabled = args.enabled; return;
           case 'plugin_logs': return state.logs?.[args.id] ?? [];
-          case 'plugin_call':
+          case 'plugin_call': {
+            const p = state.plugins.find((x) => x.id === args.id);
+            if (p && p.hasBackend) { p.backendRunning = true; p.backendPid = p.backendPid ?? 4321; }
             if (state.onPluginCall) return await state.onPluginCall(args);
             if (args.method === 'boom') throw 'plugin exploded';
             return 'RESULT:' + args.method;
+          }
+          case 'stop_plugin_backend': {
+            const p = state.plugins.find((x) => x.id === args.id);
+            if (p) { p.backendRunning = false; p.backendPid = null; }
+            return;
+          }
+          case 'stop_all_backends': {
+            let n = 0;
+            for (const p of state.plugins) {
+              if (p.backendRunning) { p.backendRunning = false; p.backendPid = null; n++; }
+            }
+            return n;
+          }
           case 'inspect_plugin_package':
             if (state.packages[args.path]) return state.packages[args.path].info;
             throw '不是有效的插件包（需要 zip 格式）: invalid Zip archive';
@@ -83,6 +108,24 @@ export function makeTauri(init = {}) {
             return `/tmp/nuthusk-drop/${name}`;
           }
           case 'discard_dropped_package': state.discarded.push(args.path); return;
+          case 'export_profile': {
+            const profile = {
+              format: 'nuthusk-profile',
+              version: 1,
+              name: args.name ?? null,
+              settings: { ...state.settings },
+              sources: (state.marketSources ?? []).filter((s) => !s.official).map((s) => ({ name: s.name, url: s.url })),
+              runtimes: (state.runtimes ?? []).filter((r) => r.installed).map((r) => r.name),
+              plugins: state.plugins.map((p) => ({ id: p.id, name: p.name, version: p.version, enabled: p.enabled })),
+              workspace: args.workspace ?? null,
+            };
+            if (args.path) state.profiles[args.path] = profile;
+            return profile;
+          }
+          case 'read_profile_file': {
+            if (state.profiles[args.path]) return state.profiles[args.path];
+            throw '无法读取配置清单文件';
+          }
           case 'runtime_status': return state.runtimes ?? [
             { name: 'python', version: '3.13.2', downloadable: true, onSystem: false, installed: null, size: 10000000, description: 'Python 3.13', source: 'python.org', userRecipe: false },
             { name: 'node', version: '22.14.0', downloadable: true, onSystem: true, installed: null, size: 20000000, description: 'Node.js', source: 'nodejs.org', userRecipe: false },
@@ -91,7 +134,11 @@ export function makeTauri(init = {}) {
           case 'runtime_remove': return;
           case 'market_sources': return state.marketSources ?? [{ id: 'official', name: '官方源', url: 'https://example.com/index.json', official: true }];
           case 'market_index': return state.marketIndex ?? { name: '官方源', entries: [], trust: trust.ok, fromCache: false, error: null };
-          case 'source_add': return;
+          case 'source_add': {
+            const s = { id: `u-${(state.marketSources ?? []).length}`, name: args.name || args.url, url: args.url, official: false };
+            state.marketSources = [...(state.marketSources ?? []), s];
+            return s;
+          }
           case 'source_remove': return;
           case 'market_download': return '/tmp/downloaded.nut';
           case 'download_cancel': return;
@@ -99,7 +146,10 @@ export function makeTauri(init = {}) {
       },
     },
     event: { listen: async () => () => {} },
-    dialog: { open: async (opts) => { calls.push(['dialog.open', opts]); return state.pick; } },
+    dialog: {
+      open: async (opts) => { calls.push(['dialog.open', opts]); return state.pick; },
+      save: async (opts) => { calls.push(['dialog.save', opts]); return state.savePath; },
+    },
     app: { getVersion: async () => state.version },
   };
   const called = (name) => calls.filter((c) => c[0] === name);

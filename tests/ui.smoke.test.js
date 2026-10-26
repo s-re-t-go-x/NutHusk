@@ -5,8 +5,14 @@ import { createDom, tick, $$, $, key, makeTauri, mkPlugin, trust } from './helpe
 const window = createDom();
 const m = makeTauri({
   plugins: [
-    mkPlugin('com.example.json-formatter', 'JSON 格式化', { keywords: ['json'], icon: 'icon.svg', trust: trust.ok }),
-    mkPlugin('com.example.hash-calc', '哈希计算', { keywords: ['hash'], permissions: ['network'], hasBackend: true, backendCommand: 'node main.js' }),
+    mkPlugin('com.example.json-formatter', 'JSON 格式化', {
+      keywords: ['json'], icon: 'icon.svg', trust: trust.ok,
+      match: { regex: ['^\\s*[\\{\\[][\\s\\S]*[\\}\\]]\\s*$'], prefixes: ['{', '['], extensions: ['json'], minLength: 2, label: '识别为 JSON 文本' },
+    }),
+    mkPlugin('com.example.hash-calc', '哈希计算', {
+      keywords: ['hash'], permissions: ['network'], hasBackend: true, backendCommand: 'node main.js',
+      match: { minLength: 1, maxLength: 10000, label: '计算文本哈希' },
+    }),
     mkPlugin('com.example.pic', '图片压缩', { category: '图片' }),
     mkPlugin('com.example.future', '未来插件', { category: '其他', error: '需要宿主 API ^2.0.0，当前为 1.0.0', icon: null }),
   ],
@@ -147,6 +153,59 @@ test('Ctrl+K 打开搜索面板，过滤后回车打开；面板里没有出错�
   assert.equal($$('.tab.active .tab-title')[0].textContent, '哈希计算');
 });
 
+test('智能内容识别 + 跨工具投递（sendTo） + 左右双栏分屏联动', async () => {
+  const jsonFrame = $$('iframe.frame').find((f) => f.src.includes('json-formatter'));
+  const hashFrame = $$('iframe.frame').find((f) => f.src.includes('hash-calc'));
+  const jsonReceived = [];
+  const hashReceived = [];
+  jsonFrame.contentWindow.postMessage = (msg) => jsonReceived.push(msg);
+  hashFrame.contentWindow.postMessage = (msg) => hashReceived.push(msg);
+  hashFrame.dispatchEvent(new window.Event('load'));
+  hashReceived.length = 0;
+
+  // 1. 在 Ctrl+K 面板粘贴一段 JSON，智能识别并带内容打开 JSON 格式化
+  key(window, 'k', { ctrlKey: true });
+  const input = document.querySelector('.pal-input');
+  input.value = '{"hello":"world"}';
+  input.dispatchEvent(new window.Event('input'));
+  assert.ok($$('.pal-row')[0].textContent.includes('识别为 JSON 文本 · 带内容打开'));
+  key(input, 'Enter');
+  await tick();
+  assert.equal($$('.tab.active .tab-title')[0].textContent, 'JSON 格式化');
+  assert.deepEqual(
+    jsonReceived.find((msg) => msg.type === 'input'),
+    { type: 'input', payload: { text: '{"hello":"world"}' } },
+  );
+
+  // 2. 开启左右双栏分屏（Shift+点击「哈希计算」标签）
+  const hashTab = $$('.tab').find((t) => t.textContent.includes('哈希计算'));
+  hashTab.dispatchEvent(new window.MouseEvent('click', { bubbles: true, shiftKey: true }));
+  await tick();
+  assert.ok($('stage').classList.contains('split-mode'), '舞台进入左右双栏分屏模式');
+  assert.ok(hashFrame.classList.contains('split'), '右侧分屏展示哈希计算');
+  assert.ok($('toolhead').textContent.includes('右侧：哈希计算'));
+
+  // 3. 从左侧 JSON 格式化点击「投递结果」（触发 sendTo 消息），面板置顶推荐「直接投递到右侧分屏」
+  window.dispatchEvent(new window.MessageEvent('message', {
+    data: { type: 'sendTo', text: '{\n  "hello": "world"\n}' },
+    source: jsonFrame.contentWindow,
+  }));
+  assert.equal($$('.pal-overlay').length, 1);
+  assert.ok(document.querySelector('.pal-banner').textContent.includes('来自：JSON 格式化'));
+  assert.ok($$('.pal-row')[0].textContent.includes('直接投递到右侧分屏'));
+  key(document.querySelector('.pal-input'), 'Enter');
+  await tick();
+  assert.deepEqual(hashReceived.pop(), {
+    type: 'input',
+    payload: { text: '{\n  "hello": "world"\n}', sourceId: 'com.example.json-formatter', sourceName: 'JSON 格式化' },
+  });
+
+  // 4. 退出双栏分屏
+  key(window, '\\', { ctrlKey: true });
+  await tick();
+  assert.equal($('stage').classList.contains('split-mode'), false);
+});
+
 test('快捷键：Ctrl+数字切换、Ctrl+W 关闭并移除 iframe、首页不可关；SDK 转发的快捷键也有效', async () => {
   key(window, '2', { ctrlKey: true });
   await tick();
@@ -165,7 +224,40 @@ test('快捷键：Ctrl+数字切换、Ctrl+W 关闭并移除 iframe、首页不�
   key(document.querySelector('.pal-input'), 'Escape');
 });
 
+test('顶栏窗口置顶按钮与后端进程状态管控（启动、显示 PID、关闭标签自动回收）', async () => {
+  // 切换窗口置顶
+  assert.equal($('pin-toggle').classList.contains('active'), false);
+  $('pin-toggle').click();
+  await tick();
+  assert.deepEqual(m.called('set_always_on_top').pop()[1], { onTop: true });
+  assert.equal($('pin-toggle').classList.contains('active'), true);
+
+  // 切到哈希计算标签并触发一次后端调用
+  key(window, '2', { ctrlKey: true });
+  await tick();
+  const hashFrame = $$('iframe.frame')[0];
+  window.dispatchEvent(new window.MessageEvent('message', {
+    data: { type: 'call', reqId: 10, method: 'hash', params: { text: 'hi' } },
+    source: hashFrame.contentWindow,
+  }));
+  await tick(50);
+
+  // 工具顶栏和状态栏立即显示后端运行中与 PID
+  assert.ok($('toolhead').textContent.includes('运行中 · PID 4321'));
+  assert.ok($('status').textContent.includes('1 个后端运行中'));
+
+  // 关闭标签页时（默认 stopOnClose=true）自动结束该插件的后端进程
+  key(window, 'w', { ctrlKey: true });
+  await tick(50);
+  assert.deepEqual(m.called('stop_plugin_backend').pop()[1], { id: 'com.example.hash-calc' });
+  assert.ok(!$('status').textContent.includes('后端运行中'));
+});
+
 test('禁用正在使用的插件：标签与 iframe 一并关闭；已禁用的不能打开', async () => {
+  navItem('首页').click();
+  await tick();
+  cardOf('哈希计算').click();
+  await tick();
   navItem('首页').click();
   await tick();
   assert.equal($$('iframe.frame').length, 1);

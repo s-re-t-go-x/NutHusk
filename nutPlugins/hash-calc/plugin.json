@@ -18,5 +18,10 @@
       "main.js"
     ]
   },
-  "permissions": []
+  "permissions": [],
+  "match": {
+    "minLength": 1,
+    "maxLength": 10000,
+    "label": "计算文本哈希"
+  }
 }

@@ -10,6 +10,10 @@ export const DEFAULT_SETTINGS = {
   theme: 'system',
   showRecent: true,
   showFavorites: true,
+  stopOnClose: true,
+  idleTimeoutMinutes: 5,
+  closeToTray: false,
+  alwaysOnTop: false,
   dirOrder: ['appdata', 'program'],
 };
 export const MAX_RECENT = 8;
@@ -58,6 +62,17 @@ export function closeTab(tabs, active, id) {
   return { tabs: next, active: next[Math.min(i, next.length - 1)] };
 }
 
+/** 拖拽调整标签顺序。首页标签固定在第一位，不参与移动。 */
+export function moveTab(tabs, fromId, toId) {
+  if (!fromId || !toId || fromId === toId || fromId === HOME || toId === HOME) return tabs;
+  const fromIdx = tabs.indexOf(fromId);
+  const toIdx = tabs.indexOf(toId);
+  if (fromIdx <= 0 || toIdx <= 0) return tabs;
+  const next = tabs.filter((t) => t !== fromId);
+  next.splice(toIdx, 0, fromId);
+  return next;
+}
+
 /** 循环切换标签。 */
 export function cycleTab(tabs, active, dir) {
   const i = tabs.indexOf(active);
@@ -101,13 +116,109 @@ export function searchPlugins(plugins, query, { favorites = [], recent = [] } = 
     .map((x) => x.p);
 }
 
-/** 插件管理页的筛选：status 取 all / enabled / disabled / error。 */
+function looksLikeJson(text) {
+  const t = text.trim();
+  if (t.length < 2) return false;
+  if (!((t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']')))) return false;
+  try {
+    JSON.parse(t);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 根据输入文本智能匹配可处理该内容的插件。
+ * 返回 [{ plugin, label, specific, score }]，按精确匹配优先排序。
+ */
+export function matchPluginsForText(plugins, rawText) {
+  const text = String(rawText ?? '');
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+
+  const isJson = looksLikeJson(trimmed);
+  const usable = plugins.filter((p) => p.enabled && !p.error && p.ui);
+  const out = [];
+
+  for (const p of usable) {
+    const m = p.match;
+    let matched = false;
+    let specific = false;
+    let label = m?.label || '处理此内容';
+
+    if (m) {
+      if (m.minLength != null && text.length < m.minLength) continue;
+      if (m.maxLength != null && text.length > m.maxLength) continue;
+
+      const hasPrefixes = Array.isArray(m.prefixes) && m.prefixes.length > 0;
+      const hasRegex = Array.isArray(m.regex) && m.regex.length > 0;
+
+      if (hasPrefixes && m.prefixes.some((pfx) => trimmed.toLowerCase().startsWith(String(pfx).toLowerCase()))) {
+        matched = true;
+        specific = true;
+      }
+      if (!matched && hasRegex) {
+        for (const pat of m.regex) {
+          try {
+            if (new RegExp(pat).test(trimmed)) {
+              matched = true;
+              specific = true;
+              break;
+            }
+          } catch { /* 忽略无效正则 */ }
+        }
+      }
+      if (!hasPrefixes && !hasRegex && (m.minLength != null || m.maxLength != null)) {
+        matched = true;
+        specific = false;
+      }
+    }
+
+    // 内置兜底启发式：若文本是合法 JSON 且插件含 json 关键词（兼容未声明 match 的旧插件）
+    if (!specific && isJson) {
+      const kws = [p.id, ...(p.keywords ?? [])].map((s) => String(s).toLowerCase());
+      if (kws.some((k) => k.includes('json'))) {
+        matched = true;
+        specific = true;
+        label = m?.label || '识别为 JSON 文本';
+      }
+    }
+
+    if (matched) {
+      out.push({
+        plugin: p,
+        label,
+        specific,
+        score: specific ? 100 : 20,
+      });
+    }
+  }
+
+  return out.sort((a, b) => b.score - a.score || a.plugin.name.localeCompare(b.plugin.name, 'zh'));
+}
+
+/** 根据文件名匹配声明了对应 extensions 的插件。 */
+export function matchPluginsForFile(plugins, fileName) {
+  const name = String(fileName ?? '').trim();
+  const dot = name.lastIndexOf('.');
+  if (dot < 0 || dot === name.length - 1) return [];
+  const ext = name.slice(dot + 1).toLowerCase();
+  return plugins.filter((p) =>
+    p.enabled && !p.error && p.ui &&
+    Array.isArray(p.match?.extensions) &&
+    p.match.extensions.some((x) => String(x).toLowerCase() === ext)
+  );
+}
+
+/** 插件管理页的筛选：status 取 all / enabled / disabled / error / running。 */
 export function filterPlugins(plugins, query = '', status = 'all') {
   const q = query.trim().toLowerCase();
   return plugins.filter((p) => {
     if (status === 'enabled' && !(p.enabled && !p.error)) return false;
     if (status === 'disabled' && p.enabled) return false;
     if (status === 'error' && !p.error) return false;
+    if (status === 'running' && !p.backendRunning) return false;
     if (!q) return true;
     return [p.name, p.id, p.description, ...(p.keywords ?? [])].some((s) => String(s ?? '').toLowerCase().includes(q));
   });

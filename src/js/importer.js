@@ -1,10 +1,12 @@
 import { el, toast, fmtSize, icon, badge, trustTag, PERM_LABEL } from './util.js';
 import { showDialog } from './dialog.js';
+import { matchPluginsForFile } from './state.js';
 
 let busy = false;
 export const isImporting = () => busy;
 
 const MAX_PACKAGE_BYTES = 300 * 1024 * 1024;
+const MAX_INPUT_TEXT_BYTES = 5 * 1024 * 1024;
 const box = (cls, ...kids) => el('div', { class: 'dlg-box ' + cls }, ...kids);
 const boxTitle = (iconName, text) => el('div', { class: 'box-title' }, icon(iconName, 16), text);
 
@@ -142,14 +144,52 @@ function readBytes(file) {
   });
 }
 
+async function readText(file) {
+  if (typeof file.text === 'function') return file.text();
+  const buf = await readBytes(file);
+  return new TextDecoder('utf-8').decode(buf);
+}
+
 /**
- * 处理拖进窗口的文件：浏览器只给文件内容、不给路径，所以先把内容交给后端存成临时文件，
- * 之后和"选择文件"走完全相同的检查、确认、安装流程。
+ * 处理拖进窗口的文件：
+ * 1. 若是 `.nutprofile` 配置加载清单文件，交由 `onImportProfile` 解析并自动同步恢复；
+ * 2. 若是 `.nut` / `.mytool` / `.zip` 插件包，交给后端暂存并走检查、确认、安装流程；
+ * 3. 若不是插件包，但有已启用插件在 `manifest.match.extensions` 中声明支持该后缀，则读取文件内容并用对应工具打开。
  */
-export async function importDroppedFiles(files, { invoke, refresh }) {
+export async function importDroppedFiles(
+  files,
+  { invoke, refresh, plugins = [], onOpenFile = null, onImportProfile = null },
+) {
   if (busy) return toast('正在导入，请先完成当前这个');
+  const profileFile = files.find((f) => /\.nutprofile$/i.test(f.name));
+  if (profileFile && onImportProfile) {
+    try {
+      const text = await readText(profileFile);
+      await onImportProfile(text);
+    } catch (err) {
+      toast(`无法读取配置清单 ${profileFile.name}：${err}`);
+    }
+    return;
+  }
+
   const packages = files.filter((f) => /\.(nut|mytool|zip)$/i.test(f.name));
-  if (!packages.length) return toast('只支持 .nut 或 .zip 格式的插件包（兼容旧的 .mytool）');
+  if (!packages.length) {
+    if (onOpenFile && files.length === 1) {
+      const f = files[0];
+      const matched = matchPluginsForFile(plugins, f.name);
+      if (matched.length) {
+        if (f.size > MAX_INPUT_TEXT_BYTES) return toast(`${f.name} 超过 5 MB，无法直接作为文本载入`);
+        try {
+          const text = await readText(f);
+          onOpenFile({ fileName: f.name, text }, matched);
+          return;
+        } catch (err) {
+          return toast(`无法读取 ${f.name}：${err}`);
+        }
+      }
+    }
+    return toast('只支持 .nut 或 .zip 格式的插件包（兼容旧的 .mytool）');
+  }
   if (packages.length < files.length) toast(`已忽略 ${files.length - packages.length} 个不是插件包的文件`);
 
   const items = [];

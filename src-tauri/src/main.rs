@@ -1,9 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use nuthusk_core::{
-    package, DataRoot, IndexResult, InstallResult, InstalledRuntime, Market, PackageInfo,
-    Permission, PluginInfo, PluginManager, RootPathInfo, Roots, RuntimeManager, RuntimeStatus,
-    Settings, Source, CONFIG_DIR,
+    package, DataRoot, IndexResult, InstallResult, InstalledRuntime, Market, NutProfile,
+    PackageInfo, Permission, PluginInfo, PluginManager, ProfilePlugin, ProfileSource,
+    ProfileWorkspace, RootPathInfo, Roots, RuntimeManager, RuntimeStatus, Settings, Source,
+    CONFIG_DIR, PROFILE_FORMAT, PROFILE_VERSION,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -11,7 +12,13 @@ use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::{http, AppHandle, Emitter, Manager, State};
+use std::time::Duration;
+use tauri::{
+    http,
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Emitter, Manager, State, WindowEvent,
+};
 
 const SDK_JS: &str = include_str!("../../sdk/ui.js");
 const SDK_CSS: &str = include_str!("../../sdk/ui.css");
@@ -21,7 +28,7 @@ const TRUSTED_KEYS_JSON: &str = include_str!("../trusted_keys.json");
 
 struct AppState {
     manager: Arc<PluginManager>,
-    settings: Settings,
+    settings: Arc<Settings>,
     roots: Arc<Roots>,
     runtimes: Arc<RuntimeManager>,
     market: Arc<Market>,
@@ -29,6 +36,8 @@ struct AppState {
     drop_dir: PathBuf,
     /// 正在进行的下载：key → 取消标志。
     jobs: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// 从托盘菜单点击"退出"时置为 true，放行窗口关闭。
+    quitting: AtomicBool,
 }
 
 /// 下载进度事件（"download-progress"）的内容。
@@ -100,6 +109,35 @@ async fn plugin_call(
     state.manager.invoke(&id, &method, params).await
 }
 
+/// 结束指定插件的后端进程。
+#[tauri::command]
+async fn stop_plugin_backend(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.manager.stop(&id).await;
+    Ok(())
+}
+
+/// 结束所有正在运行的插件后端进程，返回被停止的进程数。
+#[tauri::command]
+async fn stop_all_backends(state: State<'_, AppState>) -> Result<usize, String> {
+    Ok(state.manager.stop_all().await)
+}
+
+/// 设置主窗口是否置顶（Always on Top），并同步保存到设置中。
+#[tauri::command]
+fn set_always_on_top(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    on_top: bool,
+) -> Result<bool, String> {
+    window
+        .set_always_on_top(on_top)
+        .map_err(|e| format!("无法设置窗口置顶: {e}"))?;
+    let _ = state
+        .settings
+        .patch(&serde_json::json!({ "alwaysOnTop": on_top }));
+    Ok(on_top)
+}
+
 /// 检查插件包但不安装，返回清单、权限、后端命令、来源可信度和 SHA-256，供用户确认。
 #[tauri::command]
 async fn inspect_plugin_package(
@@ -144,8 +182,16 @@ fn get_settings(state: State<'_, AppState>) -> Value {
 }
 
 #[tauri::command]
-fn patch_settings(state: State<'_, AppState>, patch: Value) -> Result<Value, String> {
-    state.settings.patch(&patch)
+fn patch_settings(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    patch: Value,
+) -> Result<Value, String> {
+    let next = state.settings.patch(&patch)?;
+    if let Some(on_top) = patch.get("alwaysOnTop").and_then(Value::as_bool) {
+        let _ = window.set_always_on_top(on_top);
+    }
+    Ok(next)
 }
 
 /// 数据根目录的展示信息：每个根下的 nutPlugins / nutRuntimes / nutConfig，以及里面有多少插件、运行时。
@@ -329,6 +375,75 @@ fn trusted_signers(state: State<'_, AppState>) -> Vec<Signer> {
         .collect()
 }
 
+/* ---------- 配置加载清单（.nutprofile）导入与导出 ---------- */
+
+fn build_current_profile(
+    state: &AppState,
+    name: Option<String>,
+    workspace: Option<ProfileWorkspace>,
+) -> NutProfile {
+    let sources = state
+        .market
+        .sources()
+        .into_iter()
+        .filter(|s| !s.official)
+        .map(|s| ProfileSource {
+            name: s.name,
+            url: s.url,
+        })
+        .collect();
+    let runtimes = state
+        .runtimes
+        .installed()
+        .into_iter()
+        .map(|r| r.name)
+        .collect();
+    let plugins = state
+        .manager
+        .list()
+        .into_iter()
+        .map(|p| ProfilePlugin {
+            id: p.id,
+            name: p.name,
+            version: Some(p.version),
+            enabled: p.enabled,
+            url: None,
+            sha256: None,
+        })
+        .collect();
+    NutProfile {
+        format: PROFILE_FORMAT.into(),
+        version: PROFILE_VERSION,
+        name,
+        settings: state.settings.get(),
+        sources,
+        runtimes,
+        plugins,
+        workspace,
+    }
+}
+
+/// 导出当前工作台的配置清单文件（`.nutprofile`）。若传入 `path` 则写入磁盘并返回完整对象。
+#[tauri::command]
+fn export_profile(
+    state: State<'_, AppState>,
+    path: Option<String>,
+    name: Option<String>,
+    workspace: Option<ProfileWorkspace>,
+) -> Result<NutProfile, String> {
+    let profile = build_current_profile(&state, name, workspace);
+    if let Some(p) = path {
+        profile.write_file(Path::new(&p))?;
+    }
+    Ok(profile)
+}
+
+/// 从文件路径读取并校验 `.nutprofile` 配置清单文件。
+#[tauri::command]
+fn read_profile_file(path: String) -> Result<NutProfile, String> {
+    NutProfile::read_file(Path::new(&path))
+}
+
 /// 接收拖进窗口的文件内容（二进制），存成临时文件并返回路径，之后与"选择文件"走同一套检查/安装流程。
 #[tauri::command]
 fn save_dropped_package(
@@ -505,6 +620,72 @@ fn data_roots(app: &tauri::App) -> tauri::Result<Vec<DataRoot>> {
     ])
 }
 
+fn toggle_main_window(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let visible = win.is_visible().unwrap_or(true);
+        let minimized = win.is_minimized().unwrap_or(false);
+        if visible && !minimized {
+            let _ = win.hide();
+        } else {
+            let _ = win.show();
+            let _ = win.unminimize();
+            let _ = win.set_focus();
+        }
+    }
+}
+
+fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+    let show_item = MenuItem::with_id(app, "toggle", "显示 / 隐藏主窗口", true, None::<&str>)?;
+    let stop_item = MenuItem::with_id(
+        app,
+        "stop_backends",
+        "结束所有后台插件进程",
+        true,
+        None::<&str>,
+    )?;
+    let quit_item = MenuItem::with_id(app, "quit", "退出 NutHusk", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show_item, &stop_item, &quit_item])?;
+
+    let mut builder = TrayIconBuilder::new()
+        .menu(&menu)
+        .tooltip("NutHusk")
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "toggle" => toggle_main_window(app),
+            "stop_backends" => {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = app.state::<AppState>();
+                    let stopped = state.manager.stop_all().await;
+                    if stopped > 0 {
+                        let _ = app.emit("backends-changed", stopped);
+                    }
+                });
+            }
+            "quit" => {
+                let state = app.state::<AppState>();
+                state.quitting.store(true, Ordering::SeqCst);
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                toggle_main_window(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    let _ = builder.build(app)?;
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -516,7 +697,7 @@ fn main() {
             let data = app.path().app_data_dir()?;
             // 设置和插件启用状态属于"状态"，固定放在 AppData 的 nutConfig 里
             let state_dir = data.join(CONFIG_DIR);
-            let settings = Settings::load(state_dir.join("settings.json"));
+            let settings = Arc::new(Settings::load(state_dir.join("settings.json")));
             let keys = nuthusk_core::load_trusted_keys(TRUSTED_KEYS_JSON).unwrap_or_else(|e| {
                 eprintln!("trusted_keys.json 无效，所有插件都将显示为未经安全验证: {e}");
                 Vec::new()
@@ -532,6 +713,37 @@ fn main() {
             );
             manager.scan();
 
+            if let Some(true) = settings.get().get("alwaysOnTop").and_then(Value::as_bool) {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.set_always_on_top(true);
+                }
+            }
+
+            // 后台定时回收闲置超时的插件后端进程
+            {
+                let manager = manager.clone();
+                let settings = settings.clone();
+                let handle = app.handle().clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(Duration::from_secs(15));
+                    let mins = settings
+                        .get()
+                        .get("idleTimeoutMinutes")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(5);
+                    if mins > 0 {
+                        let stopped = tauri::async_runtime::block_on(
+                            manager.reap_idle(Duration::from_secs(mins * 60)),
+                        );
+                        if !stopped.is_empty() {
+                            let _ = handle.emit("backends-changed", stopped.len());
+                        }
+                    }
+                });
+            }
+
+            let _ = setup_tray(app);
+
             let drop_dir = std::env::temp_dir().join("nuthusk-drop");
             package::clean_temp_dir(&drop_dir); // 清掉上次遗留的临时文件
             app.manage(AppState {
@@ -542,13 +754,33 @@ fn main() {
                 market,
                 drop_dir,
                 jobs: Mutex::new(HashMap::new()),
+                quitting: AtomicBool::new(false),
             });
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let app = window.app_handle();
+                let state = app.state::<AppState>();
+                let close_to_tray = state
+                    .settings
+                    .get()
+                    .get("closeToTray")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if close_to_tray && !state.quitting.load(Ordering::SeqCst) {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             list_plugins,
             set_plugin_enabled,
             plugin_call,
+            stop_plugin_backend,
+            stop_all_backends,
+            set_always_on_top,
             inspect_plugin_package,
             install_plugin_package,
             uninstall_plugin,
@@ -559,6 +791,8 @@ fn main() {
             plugin_dirs,
             set_dir_order,
             trusted_signers,
+            export_profile,
+            read_profile_file,
             save_dropped_package,
             discard_dropped_package,
             runtime_status,
@@ -576,7 +810,7 @@ fn main() {
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
                 let state = app.state::<AppState>();
-                tauri::async_runtime::block_on(state.manager.stop_all());
+                let _ = tauri::async_runtime::block_on(state.manager.stop_all());
                 package::clean_temp_dir(&state.drop_dir);
             }
         });

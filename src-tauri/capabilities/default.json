@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "主窗口的默认权限。插件界面运行在沙箱 iframe 中，不在此列，无法直接调用 IPC。",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open"]
+  "permissions": ["core:default", "dialog:allow-open", "dialog:allow-save"]
 }

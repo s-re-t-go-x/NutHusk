@@ -11,5 +11,15 @@
     "格式化"
   ],
   "ui": "ui.html",
-  "permissions": []
+  "permissions": [],
+  "match": {
+    "regex": [
+      "^\\s*(?:\\{[\\s\\S]*\\}|\\[[\\s\\S]*\\])\\s*$"
+    ],
+    "extensions": [
+      "json"
+    ],
+    "minLength": 2,
+    "label": "识别为 JSON 文本"
+  }
 }

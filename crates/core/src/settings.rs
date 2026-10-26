@@ -14,6 +14,10 @@ fn defaults() -> Map<String, Value> {
         "theme": "system",
         "showRecent": true,
         "showFavorites": true,
+        "stopOnClose": true,
+        "idleTimeoutMinutes": 5,
+        "closeToTray": false,
+        "alwaysOnTop": false,
         "dirOrder": ["appdata", "program"]
     });
     v.as_object().cloned().unwrap_or_default()
@@ -25,15 +29,25 @@ fn validate(key: &str, value: &Value) -> Result<(), String> {
             Some("system" | "light" | "dark") => Ok(()),
             _ => Err("theme 只能是 system / light / dark".into()),
         },
-        "showRecent" | "showFavorites" => {
+        "showRecent" | "showFavorites" | "stopOnClose" | "closeToTray" | "alwaysOnTop" => {
             if value.is_boolean() {
                 Ok(())
             } else {
                 Err(format!("{key} 必须是 true 或 false"))
             }
         }
+        "idleTimeoutMinutes" => match value.as_u64() {
+            Some(n) if n <= 1440 => Ok(()),
+            _ => Err("idleTimeoutMinutes 必须是 0 到 1440 之间的整数".into()),
+        },
         "dirOrder" => match value.as_array() {
-            Some(a) if !a.is_empty() && a.iter().all(|x| x.as_str().map(|s| !s.is_empty()).unwrap_or(false)) => Ok(()),
+            Some(a)
+                if !a.is_empty()
+                    && a.iter()
+                        .all(|x| x.as_str().map(|s| !s.is_empty()).unwrap_or(false)) =>
+            {
+                Ok(())
+            }
             _ => Err("dirOrder 必须是非空的字符串数组".into()),
         },
         _ => {
@@ -56,9 +70,16 @@ impl Settings {
             .ok()
             .and_then(|s| serde_json::from_str::<Value>(&s).ok())
             .and_then(|v| v.as_object().cloned())
-            .map(|m| m.into_iter().filter(|(k, v)| validate(k, v).is_ok()).collect())
+            .map(|m| {
+                m.into_iter()
+                    .filter(|(k, v)| validate(k, v).is_ok())
+                    .collect()
+            })
             .unwrap_or_default();
-        Self { path, data: Mutex::new(data) }
+        Self {
+            path,
+            data: Mutex::new(data),
+        }
     }
 
     /// 完整设置（已保存的值覆盖默认值）。
@@ -73,7 +94,11 @@ impl Settings {
     pub fn dir_order(&self) -> Vec<String> {
         self.get()["dirOrder"]
             .as_array()
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -91,8 +116,11 @@ impl Settings {
             if let Some(parent) = self.path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            std::fs::write(&self.path, serde_json::to_string_pretty(&*data).unwrap_or_default())
-                .map_err(|e| format!("保存设置失败: {e}"))?;
+            std::fs::write(
+                &self.path,
+                serde_json::to_string_pretty(&*data).unwrap_or_default(),
+            )
+            .map_err(|e| format!("保存设置失败: {e}"))?;
         }
         Ok(self.get())
     }

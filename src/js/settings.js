@@ -8,11 +8,16 @@ import { el, switchEl } from './util.js';
  * 设置的读写和校验在 Rust 侧（get_settings / patch_settings），键名保持一致。
  */
 const THEME_OPTIONS = [['system', '跟随系统'], ['light', '浅色'], ['dark', '深色']];
+const IDLE_OPTIONS = [[0, '从不'], [1, '1 分钟'], [5, '5 分钟'], [15, '15 分钟'], [30, '30 分钟']];
 
 const SECTIONS = [
   {
     title: '外观',
-    items: [{ type: 'segmented', key: 'theme', label: '主题', desc: '跟随系统，或固定为浅色 / 深色。插件界面会同步。', options: THEME_OPTIONS }],
+    items: [
+      { type: 'segmented', key: 'theme', label: '主题', desc: '跟随系统，或固定为浅色 / 深色。插件界面会同步。', options: THEME_OPTIONS },
+      { type: 'switch', key: 'alwaysOnTop', label: '窗口置顶', desc: '将主窗口固定在屏幕最前端（也可点击顶栏图钉按钮随时切换）。' },
+      { type: 'switch', key: 'closeToTray', label: '关闭按钮最小化到托盘', desc: '点击窗口关闭按钮时隐藏到系统托盘，不退出程序。' },
+    ],
   },
   {
     title: '首页',
@@ -34,7 +39,7 @@ function rowWith(label, desc, control) {
 }
 
 function renderItem(item, app, actions) {
-  const value = app.settings[item.key];
+  const value = app.settings?.[item.key];
   if (item.type === 'segmented') {
     return rowWith(item.label, item.desc, el('div', { class: 'segmented', role: 'radiogroup', 'aria-label': item.label },
       ...item.options.map(([v, text]) => el('button', {
@@ -51,7 +56,24 @@ function renderItem(item, app, actions) {
 
 function renderDirs(app, actions) {
   const dirs = app.dirs;
-  if (!dirs.length) return el('div', { class: 'set-box' }, el('div', { class: 'set-note', textContent: '读取中…' }));
+  const profileRow = rowWith(
+    '配置加载清单（.nutprofile）',
+    '导出当前设置、插件源、已装插件与运行环境清单；导入或直接拖入清单文件即可在新设备自动下载恢复到相同状态。',
+    el('div', { class: 'dir-btns' },
+      el('button', {
+        class: 'btn sm', type: 'button', textContent: '导入配置清单…',
+        onclick: () => actions.importProfile?.(),
+      }),
+      el('button', {
+        class: 'btn sm primary', type: 'button', textContent: '导出配置清单…',
+        onclick: () => actions.exportProfile?.(),
+      })));
+
+  if (!dirs.length) {
+    return el('div', { class: 'set-box' },
+      profileRow,
+      el('div', { class: 'set-note', textContent: '读取中…' }));
+  }
   return el('div', { class: 'set-box' },
     ...dirs.map((d, i) => el('div', { class: 'set-row dir-row' },
       el('span', { class: 'dir-no', textContent: String(i + 1) }),
@@ -69,15 +91,34 @@ function renderDirs(app, actions) {
       el('div', { class: 'dir-btns' },
         el('button', { class: 'btn sm', type: 'button', textContent: '上移', disabled: i === 0, 'aria-label': `上移${d.label}`, onclick: () => actions.moveDir(d.key, -1) }),
         el('button', { class: 'btn sm', type: 'button', textContent: '下移', disabled: i === dirs.length - 1, 'aria-label': `下移${d.label}`, onclick: () => actions.moveDir(d.key, 1) })))),
+    profileRow,
     el('div', { class: 'set-note', textContent: '程序包含两个根目录，每个根下有插件（nutPlugins）、运行时环境（nutRuntimes）与配置（nutConfig）。靠前的目录优先；新下载的插件和运行时会保存到靠前且可写的目录中。' }));
 }
 
 function renderRuntimes(app, actions) {
   const runtimes = app.runtimes ?? [];
+  const policyRows = [
+    renderItem({
+      type: 'switch',
+      key: 'stopOnClose',
+      label: '关闭标签页时结束后端进程',
+      desc: '关闭某个工具标签页时，自动停止它的后台进程以立即释放内存。',
+    }, app, actions),
+    renderItem({
+      type: 'segmented',
+      key: 'idleTimeoutMinutes',
+      label: '后端闲置自动休眠',
+      desc: '后端进程超过指定时间无请求时自动结束；下次调用时会自动重新拉起。',
+      options: IDLE_OPTIONS,
+    }, app, actions),
+  ];
   if (!runtimes.length) {
-    return el('div', { class: 'set-box' }, el('div', { class: 'set-note', textContent: '正在检测运行环境…' }));
+    return el('div', { class: 'set-box' },
+      ...policyRows,
+      el('div', { class: 'set-note', textContent: '正在检测运行环境…' }));
   }
   return el('div', { class: 'set-box' },
+    ...policyRows,
     ...runtimes.map((r) => {
       let statusTag;
       let btn = null;

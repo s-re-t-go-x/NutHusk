@@ -25,7 +25,13 @@
         <textarea id="input" class="nh-pane-body mono" spellcheck="false" placeholder='{"hello":"world"}'></textarea>
       </section>
       <section class="nh-pane">
-        <header class="nh-pane-head"><span>输出</span><span><button id="copy" class="small">复制</button></span></header>
+        <header class="nh-pane-head">
+          <span>输出</span>
+          <span>
+            <button id="send" class="small">投递到…</button>
+            <button id="copy" class="small">复制</button>
+          </span>
+        </header>
         <textarea id="output" class="nh-pane-body mono" spellcheck="false" readonly></textarea>
       </section>
     </div>
@@ -75,9 +81,20 @@
     $('chk').onclick = function () { run('check'); };
     $('clear').onclick = function () { $('input').value = ''; $('output').value = ''; setStatus('', '已清空'); };
     $('copy').onclick = copy;
+    $('send').onclick = function () {
+      var text = $('output').value || $('input').value;
+      if (!text.trim()) { setStatus('', '没有可投递的内容'); return; }
+      if (window.nuthusk && nuthusk.sendTo) nuthusk.sendTo(text);
+    };
     $('input').addEventListener('keydown', function (e) {
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); run('format'); }
     });
+    if (window.nuthusk && nuthusk.onInput) {
+      nuthusk.onInput(function (text) {
+        $('input').value = text;
+        run('format');
+      });
+    }
   </script>
 </body>
 </html>
