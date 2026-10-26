@@ -1,0 +1,4 @@
+{
+  "type": "module",
+  "description": "让 Node 把这里的文件当作 ES 模块（仅测试用到），对浏览器没有影响"
+}

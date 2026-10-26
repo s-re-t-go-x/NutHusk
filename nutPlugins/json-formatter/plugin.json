@@ -1,0 +1,15 @@
+{
+  "id": "com.example.json-formatter",
+  "name": "JSON 格式化",
+  "version": "1.0.0",
+  "apiVersion": "^1.0.0",
+  "description": "格式化、压缩、校验 JSON 文本（纯前端，无后端进程）",
+  "icon": "icon.svg",
+  "category": "开发",
+  "keywords": [
+    "json",
+    "格式化"
+  ],
+  "ui": "ui.html",
+  "permissions": []
+}

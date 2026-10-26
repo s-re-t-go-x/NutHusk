@@ -1,0 +1,53 @@
+/* NutHusk 插件界面的基础样式。在 ui.html 里引入：<link rel="stylesheet" href="/_sdk/ui.css">
+   它会自动跟随宿主的亮/暗主题，并给原生控件（按钮、输入框等）统一外观。 */
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9; --surface: #ffffff; --text: #1c1f24; --muted: #6b7280;
+  --border: #e3e5e9; --hover: #eceef2; --accent: #3b82f6; --accent-bg: #3b82f620;
+  --danger: #dc2626; --danger-bg: #dc262618; --ok: #15803d; --ok-bg: #16a34a24;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --bg: #16181c; --surface: #1f2228; --text: #e8eaed; --muted: #9aa0aa;
+    --border: #2f343c; --hover: #2a2e36; --accent: #60a5fa; --accent-bg: #60a5fa25;
+    --danger: #f87171; --danger-bg: #f8717122; --ok: #4ade80; --ok-bg: #4ade8022;
+  }
+}
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #16181c; --surface: #1f2228; --text: #e8eaed; --muted: #9aa0aa;
+  --border: #2f343c; --hover: #2a2e36; --accent: #60a5fa; --accent-bg: #60a5fa25;
+  --danger: #f87171; --danger-bg: #f8717122; --ok: #4ade80; --ok-bg: #4ade8022;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; padding: 12px; background: var(--bg); color: var(--text); font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+
+button { padding: 5px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); font: inherit; cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .5; cursor: not-allowed; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.small { padding: 2px 10px; font-size: 12px; }
+input, select, textarea { padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); font: inherit; }
+input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--accent-bg); border-color: var(--accent); }
+textarea { resize: none; }
+label { display: inline-flex; align-items: center; gap: 6px; }
+.mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; line-height: 1.6; }
+.muted { color: var(--muted); }
+
+/* 常用版式：整页纵向排列 / 工具栏 / 左右分栏 / 结果条 */
+.nh-page { display: flex; flex-direction: column; gap: 10px; height: calc(100vh - 24px); min-height: 0; }
+.nh-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.nh-spacer { flex: 1; }
+.nh-panes { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+@media (max-width: 560px) { .nh-panes { grid-template-columns: 1fr; } }
+.nh-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); overflow: hidden; }
+.nh-pane-head { display: flex; align-items: center; justify-content: space-between; padding: 5px 10px; border-bottom: 1px solid var(--border); background: var(--bg); color: var(--muted); font-size: 12px; }
+.nh-pane-body { flex: 1; min-height: 0; width: 100%; border: 0; border-radius: 0; background: transparent; padding: 10px; }
+.nh-pane-body:focus { outline: none; }
+.nh-status { padding: 6px 10px; border-radius: 8px; background: var(--hover); color: var(--muted); }
+.nh-status.ok { background: var(--ok-bg); color: var(--ok); }
+.nh-status.err { background: var(--danger-bg); color: var(--danger); }
+.nh-meta { color: var(--muted); font-size: 12px; }

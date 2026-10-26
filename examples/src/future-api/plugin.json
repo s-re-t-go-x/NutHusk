@@ -1,0 +1,9 @@
+{
+  "id": "com.example.future-api",
+  "name": "需要新版宿主的插件",
+  "version": "1.0.0",
+  "apiVersion": "^2.0.0",
+  "description": "用于演示不兼容提示：它要求宿主 API 2.x，而当前是 1.x",
+  "ui": "ui.html",
+  "icon": "icon.svg"
+}

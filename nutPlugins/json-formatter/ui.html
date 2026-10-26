@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <link rel="stylesheet" href="/_sdk/ui.css" />
+</head>
+<body>
+  <div class="nh-page">
+    <div class="nh-toolbar">
+      <button id="fmt" class="primary">格式化</button>
+      <button id="min">压缩</button>
+      <button id="chk">校验</button>
+      <span class="nh-spacer"></span>
+      <label>缩进
+        <select id="indent">
+          <option value="2">2 空格</option>
+          <option value="4">4 空格</option>
+          <option value="tab">Tab</option>
+        </select>
+      </label>
+    </div>
+    <div class="nh-panes">
+      <section class="nh-pane">
+        <header class="nh-pane-head"><span>输入</span><span><button id="clear" class="small">清空</button></span></header>
+        <textarea id="input" class="nh-pane-body mono" spellcheck="false" placeholder='{"hello":"world"}'></textarea>
+      </section>
+      <section class="nh-pane">
+        <header class="nh-pane-head"><span>输出</span><span><button id="copy" class="small">复制</button></span></header>
+        <textarea id="output" class="nh-pane-body mono" spellcheck="false" readonly></textarea>
+      </section>
+    </div>
+    <div id="status" class="nh-status">粘贴 JSON 后点「格式化」</div>
+  </div>
+  <script src="/_sdk/ui.js"></script>
+  <script>
+    var $ = function (id) { return document.getElementById(id); };
+
+    function setStatus(kind, text) {
+      $('status').className = 'nh-status ' + kind;
+      $('status').textContent = text;
+    }
+
+    // mode: format | minify | check
+    function run(mode) {
+      var src = $('input').value;
+      if (!src.trim()) { setStatus('', '请先在左侧输入 JSON'); return; }
+      var t0 = performance.now();
+      try {
+        var value = JSON.parse(src);
+        var indent = $('indent').value === 'tab' ? '\t' : Number($('indent').value);
+        var out = mode === 'minify' ? JSON.stringify(value) : mode === 'check' ? $('output').value : JSON.stringify(value, null, indent);
+        if (mode !== 'check') $('output').value = out;
+        var ms = Math.max(0, Math.round(performance.now() - t0));
+        setStatus('ok', 'JSON 格式正确 · 输入 ' + src.length + ' 字符' + (mode === 'check' ? '' : ' · 输出 ' + out.length + ' 字符') + ' · 耗时 ' + ms + ' ms');
+      } catch (e) {
+        if (mode !== 'check') $('output').value = '';
+        setStatus('err', '不是合法的 JSON：' + e.message);
+      }
+    }
+
+    function copy() {
+      var out = $('output');
+      if (!out.value) { setStatus('', '没有可复制的内容'); return; }
+      out.focus();
+      out.select();
+      // 沙箱 iframe 里不一定能用 navigator.clipboard，用传统方式兜底
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+      out.setSelectionRange(0, 0);
+      setStatus(ok ? 'ok' : '', ok ? '已复制到剪贴板' : '复制失败，请手动选中后按 Ctrl+C');
+    }
+
+    $('fmt').onclick = function () { run('format'); };
+    $('min').onclick = function () { run('minify'); };
+    $('chk').onclick = function () { run('check'); };
+    $('clear').onclick = function () { $('input').value = ''; $('output').value = ''; setStatus('', '已清空'); };
+    $('copy').onclick = copy;
+    $('input').addEventListener('keydown', function (e) {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); run('format'); }
+    });
+  </script>
+</body>
+</html>

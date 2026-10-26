@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NutHusk</title>
+  <script src="js/boot.js"></script>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header id="topbar">
+    <div></div>
+    <button id="open-palette" class="searchbtn" type="button" aria-label="搜索工具">
+      <span id="search-icon"></span>
+      <span class="searchbtn-text">搜索工具或命令</span>
+      <kbd id="kbd-hint">Ctrl K</kbd>
+    </button>
+    <div class="topbar-right"><button id="theme-toggle" class="iconbtn" type="button"></button></div>
+  </header>
+  <div id="body">
+    <aside id="sidebar">
+      <nav id="nav" aria-label="导航"></nav>
+      <nav id="nav-bottom" aria-label="管理"></nav>
+    </aside>
+    <section id="main">
+      <div id="tabs" role="tablist"></div>
+      <div id="toolhead" class="hidden"></div>
+      <div id="stage">
+        <div id="home"></div>
+        <div id="download" class="hidden"></div>
+        <div id="manage" class="hidden"></div>
+        <div id="settings" class="hidden"></div>
+      </div>
+    </section>
+  </div>
+  <footer id="status"></footer>
+  <div id="drop-overlay" class="hidden"><div>松开鼠标，导入插件包</div></div>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

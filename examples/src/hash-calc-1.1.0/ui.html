@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <link rel="stylesheet" href="/_sdk/ui.css" />
+</head>
+<body>
+  <div class="nh-page">
+    <div class="nh-toolbar">
+      <button id="go" class="primary">计算</button>
+      <label>算法
+        <select id="algo"><option>sha256</option><option>sha1</option><option>sha512</option><option>md5</option></select>
+      </label>
+      <span class="nh-spacer"></span>
+      <button id="copy" class="small">复制结果</button>
+    </div>
+    <section class="nh-pane" style="flex:1">
+      <header class="nh-pane-head"><span>输入文本</span></header>
+      <textarea id="text" class="nh-pane-body mono" spellcheck="false" placeholder="输入要计算哈希的文本"></textarea>
+    </section>
+    <section class="nh-pane">
+      <header class="nh-pane-head"><span>结果</span></header>
+      <div id="out" class="mono" style="padding:10px;word-break:break-all;min-height:2.6em"></div>
+    </section>
+    <div id="status" class="nh-status">由后端进程计算（演示进程外后端）</div>
+  </div>
+  <script src="/_sdk/ui.js"></script>
+  <script>
+    var $ = function (id) { return document.getElementById(id); };
+    function setStatus(kind, text) { $('status').className = 'nh-status ' + kind; $('status').textContent = text; }
+
+    $('go').onclick = async function () {
+      try {
+        var t0 = performance.now();
+        $('out').textContent = await nuthusk.call('hash', { text: $('text').value, algo: $('algo').value });
+        setStatus('ok', '完成 · 耗时 ' + Math.round(performance.now() - t0) + ' ms');
+      } catch (e) {
+        $('out').textContent = '';
+        setStatus('err', e.message);
+      }
+    };
+    $('copy').onclick = function () {
+      var range = document.createRange();
+      range.selectNodeContents($('out'));
+      var sel = getSelection(); sel.removeAllRanges(); sel.addRange(range);
+      var ok = false; try { ok = document.execCommand('copy'); } catch (e) {}
+      sel.removeAllRanges();
+      setStatus(ok ? 'ok' : '', ok ? '已复制' : '复制失败，请手动选中后按 Ctrl+C');
+    };
+  </script>
+</body>
+</html>

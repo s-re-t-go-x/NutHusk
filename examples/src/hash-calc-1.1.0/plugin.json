@@ -1,0 +1,22 @@
+{
+  "id": "com.example.hash-calc",
+  "name": "哈希计算",
+  "version": "1.1.0",
+  "apiVersion": "^1.0.0",
+  "description": "计算文本的 MD5 / SHA 哈希（1.1.0：用于演示\"更新已安装插件\"，示例后端用 Node 编写）",
+  "icon": "icon.svg",
+  "category": "开发",
+  "keywords": [
+    "hash",
+    "md5",
+    "sha256"
+  ],
+  "ui": "ui.html",
+  "backend": {
+    "command": "node",
+    "args": [
+      "main.js"
+    ]
+  },
+  "permissions": []
+}
