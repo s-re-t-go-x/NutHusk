@@ -18,20 +18,24 @@ function previewText(s, max = 48) {
 
 /**
  * 命令面板（Ctrl/Cmd+K）：
- * - 普通模式：搜索工具名称/关键词，粘贴或输入文本时自动嗅探匹配的插件并支持「带内容打开」
- * - 投递模式（传入 payload: { text, sourceId, sourceName }）：把当前工具的内容投递给另一个工具或右侧分屏
+ * - 普通模式：搜索工具名称/关键词、流水线或场景工作区；粘贴或输入文本时自动嗅探匹配的插件/流水线并支持「带内容打开」
+ * - 投递模式（传入 payload: { text, sourceId, sourceName }）：把当前工具的内容投递给另一个工具、右侧分屏或流水线
  * - 分屏选择模式（mode: 'split'）：选择要在右侧并排打开的工具
  */
 export function openPalette({
   plugins,
   favorites = [],
   recent = [],
+  workflows = [],
+  workspaces = [],
   onOpen,
   payload = null,
   mode = 'search',
   activeId = null,
   splitId = null,
   onSendToSplit = null,
+  onRunWorkflow = null,
+  onSwitchWorkspace = null,
 }) {
   if (current) closePalette();
 
@@ -41,10 +45,10 @@ export function openPalette({
   let index = 0;
 
   const placeholder = payload
-    ? `选择接收「${previewText(payload.text, 24)}」的工具…`
+    ? `选择接收「${previewText(payload.text, 24)}」的工具或流水线…`
     : mode === 'split'
       ? '选择要在右侧分屏并排打开的工具…'
-      : '搜索工具，或直接粘贴文本智能匹配工具…';
+      : '搜索工具、流水线、工作区，或直接粘贴文本智能匹配…';
 
   const banner = payload
     ? el('div', { class: 'pal-banner' },
@@ -83,8 +87,46 @@ export function openPalette({
     rows[index].scrollIntoView?.({ block: 'nearest' });
   }
 
+  function matchExtraItems(qLower) {
+    const wfMatches = !onRunWorkflow ? [] : workflows.filter((wf) =>
+      wf.id !== payload?.sourceId && (
+        !qLower ||
+        wf.name.toLowerCase().includes(qLower) ||
+        (wf.description ?? '').toLowerCase().includes(qLower) ||
+        '流水线'.includes(qLower) ||
+        'workflow'.includes(qLower)
+      )
+    ).map((wf) => ({
+      plugin: { id: wf.id, name: wf.name, description: wf.description || `${wf.steps?.length ?? 0} 步串联流水线` },
+      payload: null,
+      hint: '⚡ 流水线',
+      hintClass: 'tag ok',
+      onSelect: () => onRunWorkflow(wf, payload ? payload.text : ''),
+    }));
+
+    const wsMatches = (!onSwitchWorkspace || payload) ? [] : workspaces.filter((ws) =>
+      !qLower ||
+      ws.name.toLowerCase().includes(qLower) ||
+      '工作区'.includes(qLower) ||
+      'workspace'.includes(qLower)
+    ).map((ws) => ({
+      plugin: {
+        id: ws.id,
+        name: ws.name,
+        description: `场景工作区 · ${(ws.tabs ?? []).filter((t) => t !== 'home').length} 个工具标签${ws.splitId ? '（含双栏分屏）' : ''}`,
+      },
+      payload: null,
+      hint: '场景工作区',
+      hintClass: 'tag',
+      onSelect: () => onSwitchWorkspace(ws),
+    }));
+
+    return { wfMatches, wsMatches };
+  }
+
   function buildItems(rawQuery) {
     const q = rawQuery.trim();
+    const qLower = q.toLowerCase();
 
     // 1. 投递模式（Send To）
     if (payload) {
@@ -99,6 +141,9 @@ export function openPalette({
           onSelect: () => onSendToSplit(splitPlugin.id, payload),
         });
       }
+      const { wfMatches } = matchExtraItems(qLower);
+      out.push(...wfMatches);
+
       const matchedMap = new Map(
         matchPluginsForText(plugins, payload.text).map((m) => [m.plugin.id, m])
       );
@@ -131,8 +176,14 @@ export function openPalette({
 
     // 3. 普通搜索 + 智能内容识别模式
     const nameMatches = searchPlugins(plugins, q, { favorites, recent }).slice(0, 30);
+    const { wfMatches, wsMatches } = matchExtraItems(qLower);
+
     if (!q) {
-      return nameMatches.map((p) => ({ plugin: p, payload: null, hint: p.category, hintClass: 'tag' }));
+      return [
+        ...wfMatches,
+        ...wsMatches,
+        ...nameMatches.map((p) => ({ plugin: p, payload: null, hint: p.category, hintClass: 'tag' })),
+      ].slice(0, 30);
     }
 
     const contentMatches = matchPluginsForText(plugins, rawQuery);
@@ -150,6 +201,24 @@ export function openPalette({
         hintClass: 'tag ok',
       });
     }
+
+    // 如果粘贴的文本命中了某个流水线首步插件，提供直接带内容运行流水线的选项
+    if (specificMatches.length > 0 && onRunWorkflow && workflows.length > 0) {
+      const matchedPluginIds = new Set(specificMatches.map((m) => m.plugin.id));
+      for (const wf of workflows) {
+        if (wf.steps?.[0] && matchedPluginIds.has(wf.steps[0].pluginId)) {
+          out.push({
+            plugin: { id: wf.id, name: wf.name, description: wf.description || '流水线组合' },
+            payload: null,
+            hint: '⚡ 带此内容执行流水线',
+            hintClass: 'tag ok',
+            onSelect: () => onRunWorkflow(wf, rawQuery),
+          });
+        }
+      }
+    }
+
+    out.push(...wfMatches, ...wsMatches);
 
     for (const p of nameMatches) {
       if (seen.has(p.id)) continue;

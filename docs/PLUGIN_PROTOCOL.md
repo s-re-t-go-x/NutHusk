@@ -9,6 +9,26 @@
   界面只能通过外壳转发，找自己的后端说话。
 - **最小化宿主 API，严格按版本演进。** 宿主 API 只做加法，`1.x` 内保证向后兼容。插件用 `apiVersion` 声明自己需要的版本（如 `^1.0.0` 或 `^1.1.0`），不满足时会被明确标为“加载失败”并写明原因。
 
+## 快速上手（开发者 CLI 工具链）
+
+使用 `nuthusk-sign` CLI 工具可以一条命令生成插件模板、校验协议、命令行无头运行和打包：
+
+```bash
+# 1. 生成插件脚手架（--lang 可选: js | python | rust | ui-only）
+cargo run -p nuthusk-sign -- new com.example.my-tool --lang js --name "我的工具"
+
+# 2. 校验 plugin.json 并自动启动一次后端进程测试 stdin/stdout JSON-RPC 2.0 响应
+cargo run -p nuthusk-sign -- check ./my-tool
+
+# 3. 在命令行无头运行插件声明的动作
+cargo run -p nuthusk-sign -- run ./my-tool transform --input "hello world"
+
+# 4. 打包为可安装的 .nut 插件包
+cargo run -p nuthusk-sign -- pack ./my-tool
+```
+
+在桌面端开发调试插件时，打开插件标签页后点击工具顶栏的 **「重载」** 按钮（或按 **`Ctrl/Cmd + R`**），即可一键停止旧后端进程、重新读取 `plugin.json` 并刷新插件界面。
+
 ## 插件长什么样
 
 一个插件就是一个文件夹（或打成 `.nut`，本质是 zip）：
@@ -26,8 +46,8 @@ my-plugin/
 
 | 目录 | 位置 |
 |---|---|
-| AppData | 应用数据目录下的 `plugins`（设置页里能看到完整路径） |
-| 程序目录 | 程序所在目录旁的 `plugins` |
+| AppData | 应用数据目录下的 `nutPlugins`（设置页里能看到完整路径） |
+| 程序目录 | 程序所在目录旁的 `nutPlugins` |
 
 同一个插件（`id` 相同）出现在两个目录里时，用优先级靠前的；默认 AppData 优先，可在设置里调整。新安装的插件装到靠前且可写的目录。
 
@@ -38,7 +58,7 @@ my-plugin/
   "id": "com.example.my-tool",
   "name": "我的工具",
   "version": "1.0.0",
-  "apiVersion": "^1.0.0",
+  "apiVersion": "^1.1.0",
   "description": "一句话说明",
   "icon": "icon.svg",
   "category": "开发",
@@ -53,7 +73,16 @@ my-plugin/
     "minLength": 2,
     "maxLength": 500000,
     "label": "识别为 JSON 文本"
-  }
+  },
+  "actions": [
+    {
+      "id": "format",
+      "name": "JSON 格式化",
+      "method": "format",
+      "description": "美化 JSON 文本（2 空格缩进）",
+      "defaultParams": { "indent": 2 }
+    }
+  ]
 }
 ```
 
@@ -71,6 +100,7 @@ my-plugin/
 | `backend` | 否 | 后端启动方式，见下 |
 | `permissions` | 否 | `clipboard` / `fs.read` / `fs.write` / `network`，见下 |
 | `match` | 否 | **（1.1 新增）** 智能内容识别与文件匹配规则，用于在 `Ctrl+K` 粘贴内容、跨工具投递或拖入文件时自动推荐本插件，见下 |
+| `actions` | 否 | **（1.1 新增）** 声明可供宿主流水线（Workflows）或 CLI `run` 直接调用的无界面转换动作列表，见下 |
 
 所有相对路径都不能含 `..` 或绝对路径。
 
@@ -86,6 +116,21 @@ my-plugin/
 | `minLength` | `number` | 可接收文本的最小字符数 |
 | `maxLength` | `number` | 可接收文本的最大字符数 |
 | `label` | `string` | 命中时在命令面板展示的提示语，如 `"识别为 JSON 文本"` |
+
+### actions（1.1 新增：无头动作与流水线）
+
+插件可在 `plugin.json` 中声明 `actions` 数组，使该插件能够被串联进宿主的「快捷流水线」或通过命令行 `nuthusk-sign run` 直接调用：
+
+| 子字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | `string` | 动作在插件内的唯一标识（必需） |
+| `name` | `string` | 动作显示名称（必需，如 `"计算 SHA-256"`） |
+| `method` | `string` | 调用的方法名（可选，省略时默认等于 `id`） |
+| `description` | `string` | 动作说明（可选） |
+| `defaultParams` | `object` | 调用时与 `{ text }` 合并传入的默认参数对象（可选，如 `{ "algo": "sha256" }`） |
+
+- 若插件带有 `backend`，宿主/CLI 会直接向后端发送 `method` 和 `{ ...defaultParams, text }` 的 JSON-RPC 请求。
+- 若插件是纯前端插件（无 `backend`），可在界面脚本中通过 `nuthusk.onAction(fn)` 注册处理函数参与宿主流水线。
 
 ### backend
 
@@ -188,10 +233,11 @@ Go、C#、Java、Shell 等同理：读一行、解析、写一行、刷新。
 - `/_sdk/ui.js`：
   - `await nuthusk.call(method, params)` 调用自己的后端，返回后端的 `result`；后端返回 `error` 时抛出异常。
   - **（1.1 新增）** `nuthusk.onInput(function (text, meta) { ... })`：注册输入接收回调。当用户在 `Ctrl+K` 粘贴内容带入打开、拖入匹配后缀的文件，或从其他插件（及左侧分屏）投递内容过来时触发。若旧版 1.0 插件未注册 `onInput`，SDK 会自动将文本填入页面中的第一个主输入框（`<textarea>` 或 `<input>`）。
-  - **（1.1 新增）** `nuthusk.sendTo(text, targetId?)`：将当前工具产出的文本投递给其他工具。不传 `targetId` 时，宿主会弹出投递面板（若当前开启了左右双栏分屏，面板第一项支持一键投递到右侧分屏工具）。
+  - **（1.1 新增）** `nuthusk.onAction(function (method, params) { ... })`：注册无头动作回调，供纯前端插件参与宿主的「快捷流水线」执行，支持直接返回值或返回 `Promise`。
+  - **（1.1 新增）** `nuthusk.sendTo(text, targetId?)`：将当前工具产出的文本投递给其他工具或流水线。不传 `targetId` 时，宿主会弹出投递面板（若当前开启了左右双栏分屏，面板第一项支持一键投递到右侧分屏工具）。
   - 自动同步宿主的主题（给 `<html>` 加 `data-theme`）。
   - 切换到插件标签时自动聚焦主输入框；在插件内按 `Ctrl/Cmd + Enter` 自动触发主操作按钮（`.primary` / `[data-primary]` / `#go` / `#fmt`）。
-  - 焦点在插件里时，把全局快捷键（`Ctrl/Cmd` + `K` / `W` / `\` / `Tab` / `1–9`）转发给宿主。
+  - 焦点在插件里时，把全局快捷键（`Ctrl/Cmd` + `K` / `W` / `R` / `\` / `Tab` / `1–9`）转发给宿主。
 - 页面里的文件用相对路径引用即可（`icon.svg`、`app.js`、图片等都从插件自己的目录读取）。
 - 安全策略：插件页面**默认禁止一切联网**；声明了 `network` 权限才允许 `http/https` 请求。
 - 拖放：拖到插件界面上的文件由插件自己处理（所以图片类工具可以接收拖入的图片）。

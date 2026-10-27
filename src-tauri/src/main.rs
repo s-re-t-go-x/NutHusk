@@ -176,6 +176,16 @@ async fn reload_plugins(state: State<'_, AppState>) -> Result<Vec<PluginInfo>, S
     Ok(state.manager.list())
 }
 
+/// 单个插件的开发模式热重载：停止其后端进程、重新扫描清单并返回最新插件列表。
+#[tauri::command]
+async fn reload_single_plugin(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<PluginInfo>, String> {
+    state.manager.reload_single(&id).await;
+    Ok(state.manager.list())
+}
+
 #[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> Value {
     state.settings.get()
@@ -786,6 +796,7 @@ fn main() {
             uninstall_plugin,
             plugin_logs,
             reload_plugins,
+            reload_single_plugin,
             get_settings,
             patch_settings,
             plugin_dirs,

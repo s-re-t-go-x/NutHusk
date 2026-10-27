@@ -1,13 +1,10 @@
 import { el } from './util.js';
 
-let activeDone = null;
+const activeStack = [];
 
 export function closeActiveDialog(value = null) {
-  if (activeDone) {
-    const fn = activeDone;
-    activeDone = null;
-    fn(value);
-  }
+  const done = activeStack.pop();
+  if (done) done(value);
 }
 
 /**
@@ -17,16 +14,24 @@ export function closeActiveDialog(value = null) {
 export function showDialog({ title, body, buttons }) {
   return new Promise((resolve) => {
     const prevFocus = document.activeElement;
+    let closed = false;
 
     function done(value) {
-      if (activeDone === done) activeDone = null;
+      if (closed) return;
+      closed = true;
+      const idx = activeStack.lastIndexOf(done);
+      if (idx >= 0) activeStack.splice(idx, 1);
       overlay.remove();
       document.removeEventListener('keydown', onKey, true);
       prevFocus?.focus?.();
       resolve(value);
     }
-    activeDone = done;
+    activeStack.push(done);
+
     function onKey(e) {
+      // 若顶层打开了命令/投递面板（.pal-overlay），优先让面板处理 Esc
+      if (document.querySelector('.pal-overlay')) return;
+      if (activeStack[activeStack.length - 1] !== done) return;
       if (e.key === 'Escape') {
         e.preventDefault();
         e.stopPropagation();

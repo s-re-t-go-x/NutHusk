@@ -1,5 +1,7 @@
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashSet;
 use std::path::{Component, Path};
 
 /// 宿主 API 版本。发布后要长期兼容，只做加法。
@@ -106,6 +108,32 @@ pub struct MatchSpec {
     pub label: Option<String>,
 }
 
+/// 插件声明的无头/流水线动作（可选，宿主 API 1.1.0 新增）。
+/// 可被宿主流水线（Workflow）或 CLI `run` 命令直接调用，输入与输出均为文本或 JSON。
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionSpec {
+    /// 动作唯一标识（插件内唯一，如 "format", "sha256"）。
+    pub id: String,
+    /// 动作显示名称（如 "JSON 格式化", "计算 SHA-256"）。
+    pub name: String,
+    /// 调用的方法名（后端 JSON-RPC method，或前端 onAction 处理的方法名；省略时默认等于 id）。
+    #[serde(default)]
+    pub method: Option<String>,
+    /// 动作说明（可选）。
+    #[serde(default)]
+    pub description: String,
+    /// 调用时附加的默认参数对象（可选，会与 `{ text }` 合并后传给插件）。
+    #[serde(default)]
+    pub default_params: Option<Value>,
+}
+
+impl ActionSpec {
+    pub fn effective_method(&self) -> &str {
+        self.method.as_deref().unwrap_or(&self.id)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Manifest {
@@ -129,13 +157,16 @@ pub struct Manifest {
     /// 智能内容匹配规则（可选，宿主 API 1.1.0 新增）。
     #[serde(default, rename = "match")]
     pub r#match: Option<MatchSpec>,
+    /// 可供流水线或命令行直接调用的动作列表（可选，宿主 API 1.1.0 新增）。
+    #[serde(default)]
+    pub actions: Vec<ActionSpec>,
 }
 
 fn default_category() -> String {
     "其他".into()
 }
 
-fn valid_id(id: &str) -> bool {
+pub fn is_valid_id(id: &str) -> bool {
     let parts: Vec<&str> = id.split('.').collect();
     parts.len() >= 2
         && parts.iter().all(|p| {
@@ -166,7 +197,7 @@ pub fn has_icon_extension(p: &str) -> bool {
 
 impl Manifest {
     pub fn validate(&self) -> Result<(), String> {
-        if !valid_id(&self.id) {
+        if !is_valid_id(&self.id) {
             return Err(format!(
                 "id 不合法: {}（应形如 com.example.my-tool）",
                 self.id
@@ -230,6 +261,24 @@ impl Manifest {
                         "match.extensions 不合法（只需写扩展名本身，不含点）: {ext}"
                     ));
                 }
+            }
+        }
+        let mut seen_actions = HashSet::new();
+        for act in &self.actions {
+            let aid = act.id.trim();
+            if aid.is_empty() {
+                return Err("actions.id 不能为空".into());
+            }
+            if act.name.trim().is_empty() {
+                return Err(format!("动作 {aid} 的 name 不能为空"));
+            }
+            if let Some(m) = &act.method {
+                if m.trim().is_empty() {
+                    return Err(format!("动作 {aid} 的 method 不能为空"));
+                }
+            }
+            if !seen_actions.insert(aid) {
+                return Err(format!("actions.id 重复: {aid}"));
             }
         }
         Ok(())

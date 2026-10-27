@@ -95,6 +95,15 @@
         run('format');
       });
     }
+    if (window.nuthusk && nuthusk.onAction) {
+      nuthusk.onAction(function (method, params) {
+        var text = String((params && params.text) || '');
+        var parsed = JSON.parse(text);
+        if (method === 'minify') return JSON.stringify(parsed);
+        var indent = (params && params.indent != null) ? params.indent : 2;
+        return JSON.stringify(parsed, null, indent);
+      });
+    }
   </script>
 </body>
 </html>

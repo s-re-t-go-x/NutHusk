@@ -1,6 +1,7 @@
 // NutHusk 插件界面端 SDK（宿主 API 1.1.0）。ui.html 中用 <script src="/_sdk/ui.js"></script> 引入。
 //   nuthusk.call(method, params)       调用本插件自己的后端（返回 Promise）
 //   nuthusk.onInput(fn)                接收宿主带入的数据（智能识别打开或从其他工具投递而来）：fn(text, meta)
+//   nuthusk.onAction(fn)               注册流水线/无头动作处理器（供纯前端插件参与流水线）：fn(method, params) => result | Promise<result>
 //   nuthusk.sendTo(text, targetId?)    将文本投递给其他插件（不传 targetId 时弹出工具选择面板）
 // 它还会：跟随宿主的亮/暗主题；切换标签时自动聚焦主输入框；把全局快捷键转发给宿主。
 (function () {
@@ -8,6 +9,8 @@
   var seq = 0;
   var inputListeners = [];
   var queuedInputs = [];
+  var actionHandler = null;
+  var queuedActions = [];
 
   function findPrimaryInput() {
     return document.querySelector(
@@ -45,6 +48,28 @@
     }, 30);
   }
 
+  function runActionMessage(d) {
+    if (!actionHandler) {
+      queuedActions.push(d);
+      setTimeout(function () {
+        var idx = queuedActions.indexOf(d);
+        if (idx >= 0) {
+          queuedActions.splice(idx, 1);
+          parent.postMessage({ type: 'actionResult', reqId: d.reqId, error: '该插件未注册 onAction 处理器' }, '*');
+        }
+      }, 200);
+      return;
+    }
+    Promise.resolve()
+      .then(function () { return actionHandler(d.method, d.params || {}); })
+      .then(function (result) {
+        parent.postMessage({ type: 'actionResult', reqId: d.reqId, result: result }, '*');
+      })
+      .catch(function (err) {
+        parent.postMessage({ type: 'actionResult', reqId: d.reqId, error: String((err && err.message) || err) }, '*');
+      });
+  }
+
   window.addEventListener('message', function (e) {
     var d = e.data || {};
     if (d.type === 'theme') {
@@ -61,6 +86,10 @@
       deliverInput(d.payload);
       return;
     }
+    if (d.type === 'action') {
+      runActionMessage(d);
+      return;
+    }
     var p = pending.get(d.reqId);
     if (!p) return;
     pending.delete(d.reqId);
@@ -71,7 +100,7 @@
   window.addEventListener('keydown', function (e) {
     if (!(e.ctrlKey || e.metaKey)) return;
     var k = String(e.key || '').toLowerCase();
-    if (k === 'k' || k === 'w' || k === 'tab' || k === '\\' || /^[1-9]$/.test(k)) {
+    if (k === 'k' || k === 'w' || k === 'r' || k === 'tab' || k === '\\' || /^[1-9]$/.test(k)) {
       e.preventDefault();
       parent.postMessage({ type: 'key', key: e.key, ctrlKey: e.ctrlKey, metaKey: e.metaKey, shiftKey: e.shiftKey }, '*');
       return;
@@ -99,6 +128,13 @@
       while (queuedInputs.length > 0) {
         var data = queuedInputs.shift();
         try { fn(String(data.text != null ? data.text : ''), data); } catch (_) {}
+      }
+    },
+    onAction: function (fn) {
+      if (typeof fn !== 'function') return;
+      actionHandler = fn;
+      while (queuedActions.length > 0) {
+        runActionMessage(queuedActions.shift());
       }
     },
     sendTo: function (text, targetId) {

@@ -19,9 +19,11 @@ fn tmp(name: &str) -> PathBuf {
 fn make_zip(path: &Path, ui: &str) {
     use zip::write::SimpleFileOptions;
     let mut w = zip::ZipWriter::new(File::create(path).unwrap());
-    w.start_file("plugin.json", SimpleFileOptions::default()).unwrap();
+    w.start_file("plugin.json", SimpleFileOptions::default())
+        .unwrap();
     w.write_all(r#"{"id":"com.test.cli","name":"CLI 测试","version":"1.0.0","apiVersion":"^1.0.0","ui":"ui.html"}"#.as_bytes()).unwrap();
-    w.start_file("ui.html", SimpleFileOptions::default()).unwrap();
+    w.start_file("ui.html", SimpleFileOptions::default())
+        .unwrap();
     w.write_all(ui.as_bytes()).unwrap();
     w.finish().unwrap();
 }
@@ -29,21 +31,40 @@ fn make_zip(path: &Path, ui: &str) {
 fn trusted_keys_json(dir: &Path, pub_file: &Path) -> PathBuf {
     let public = fs::read_to_string(pub_file).unwrap();
     let path = dir.join("trusted_keys.json");
-    fs::write(&path, format!(r#"{{"keys":[{{"name":"测试开发者","public":"{}"}}]}}"#, public.trim())).unwrap();
+    fs::write(
+        &path,
+        format!(
+            r#"{{"keys":[{{"name":"测试开发者","public":"{}"}}]}}"#,
+            public.trim()
+        ),
+    )
+    .unwrap();
     path
 }
 
 #[test]
 fn keygen_sign_verify_full_flow() {
     let dir = tmp("flow");
-    let out = bin().current_dir(&dir).args(["keygen", "mykey"]).output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = bin()
+        .current_dir(&dir)
+        .args(["keygen", "mykey"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("trusted_keys.json") && stdout.contains("nuthusk-ed25519-public:"));
     assert!(dir.join("mykey.key").is_file() && dir.join("mykey.pub").is_file());
 
     // 不覆盖已有密钥
-    let again = bin().current_dir(&dir).args(["keygen", "mykey"]).output().unwrap();
+    let again = bin()
+        .current_dir(&dir)
+        .args(["keygen", "mykey"])
+        .output()
+        .unwrap();
     assert!(!again.status.success());
     assert!(String::from_utf8_lossy(&again.stderr).contains("已存在"));
 
@@ -52,22 +73,54 @@ fn keygen_sign_verify_full_flow() {
     let keys = trusted_keys_json(&dir, &dir.join("mykey.pub"));
 
     // 未签名：未经安全验证
-    let v = bin().args(["verify"]).arg(&pkg).arg("--keys").arg(&keys).output().unwrap();
+    let v = bin()
+        .args(["verify"])
+        .arg(&pkg)
+        .arg("--keys")
+        .arg(&keys)
+        .output()
+        .unwrap();
     assert!(v.status.success());
     assert!(String::from_utf8_lossy(&v.stdout).contains("未经安全验证"));
 
     // 签名
     let signed = dir.join("plugin.signed.nut");
-    let s = bin().arg("sign").arg(&pkg).arg("--key").arg(dir.join("mykey.key")).arg("--yes").output().unwrap();
+    let s = bin()
+        .arg("sign")
+        .arg(&pkg)
+        .arg("--key")
+        .arg(dir.join("mykey.key"))
+        .arg("--yes")
+        .output()
+        .unwrap();
     assert!(s.status.success(), "{}", String::from_utf8_lossy(&s.stderr));
-    assert!(signed.is_file(), "默认输出 <名字>.signed.<扩展名>，且不覆盖原文件");
-    let v = bin().arg("verify").arg(&signed).arg("--keys").arg(&keys).output().unwrap();
+    assert!(
+        signed.is_file(),
+        "默认输出 <名字>.signed.<扩展名>，且不覆盖原文件"
+    );
+    let v = bin()
+        .arg("verify")
+        .arg(&signed)
+        .arg("--keys")
+        .arg(&keys)
+        .output()
+        .unwrap();
     assert!(v.status.success());
-    assert!(String::from_utf8_lossy(&v.stdout).contains("可信来源"), "{}", String::from_utf8_lossy(&v.stdout));
+    assert!(
+        String::from_utf8_lossy(&v.stdout).contains("可信来源"),
+        "{}",
+        String::from_utf8_lossy(&v.stdout)
+    );
 
     // 与核心库的判断一致
     let keyset = load_trusted_keys(&fs::read_to_string(&keys).unwrap()).unwrap();
-    assert_eq!(nuthusk_core::package::inspect(&signed, &keyset).unwrap().trust.level, TrustLevel::Trusted);
+    assert_eq!(
+        nuthusk_core::package::inspect(&signed, &keyset)
+            .unwrap()
+            .trust
+            .level,
+        TrustLevel::Trusted
+    );
 
     // 篡改内容后验证失败（退出码非 0）
     let tampered = dir.join("tampered.nut");
@@ -75,14 +128,21 @@ fn keygen_sign_verify_full_flow() {
         let sig = {
             let mut ar = zip::ZipArchive::new(File::open(&signed).unwrap()).unwrap();
             let mut t = String::new();
-            std::io::Read::read_to_string(&mut ar.by_name("signature.json").unwrap(), &mut t).unwrap();
+            std::io::Read::read_to_string(&mut ar.by_name("signature.json").unwrap(), &mut t)
+                .unwrap();
             t
         };
         make_zip(&tampered, "<script>evil()</script>");
         // 往篡改后的包里补上原来的签名
         let tmp2 = dir.join("tampered2.nut");
         nuthusk_core::package::write_signed(&tampered, &tmp2, &sig).unwrap();
-        let v = bin().arg("verify").arg(&tmp2).arg("--keys").arg(&keys).output().unwrap();
+        let v = bin()
+            .arg("verify")
+            .arg(&tmp2)
+            .arg("--keys")
+            .arg(&keys)
+            .output()
+            .unwrap();
         assert!(!v.status.success());
         assert!(String::from_utf8_lossy(&v.stdout).contains("签名无效"));
     }
@@ -91,15 +151,26 @@ fn keygen_sign_verify_full_flow() {
 #[test]
 fn sign_requires_explicit_confirmation() {
     let dir = tmp("confirm");
-    assert!(bin().current_dir(&dir).args(["keygen", "k"]).status().unwrap().success());
+    assert!(bin()
+        .current_dir(&dir)
+        .args(["keygen", "k"])
+        .status()
+        .unwrap()
+        .success());
     let pkg = dir.join("p.nut");
     make_zip(&pkg, "x");
 
     // 回答 no → 取消，不产生任何输出文件
     let mut child = bin()
-        .arg("sign").arg(&pkg).arg("--key").arg(dir.join("k.key"))
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().unwrap();
+        .arg("sign")
+        .arg(&pkg)
+        .arg("--key")
+        .arg(dir.join("k.key"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
     child.stdin.take().unwrap().write_all(b"no\n").unwrap();
     let out = child.wait_with_output().unwrap();
     assert!(!out.status.success());
@@ -110,12 +181,97 @@ fn sign_requires_explicit_confirmation() {
 
     // 回答 yes → 签名
     let mut child = bin()
-        .arg("sign").arg(&pkg).arg("--key").arg(dir.join("k.key"))
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().unwrap();
+        .arg("sign")
+        .arg(&pkg)
+        .arg("--key")
+        .arg(dir.join("k.key"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
     child.stdin.take().unwrap().write_all(b"yes\n").unwrap();
     assert!(child.wait_with_output().unwrap().status.success());
     assert!(dir.join("p.signed.nut").is_file());
+}
+
+#[test]
+fn devkit_new_check_run_and_pack_cli_flow() {
+    let dir = tmp("devkit");
+    let created = dir.join("upper-tool");
+
+    // 1. new
+    let out = bin()
+        .current_dir(&dir)
+        .args([
+            "new",
+            "com.example.upper-tool",
+            "--lang",
+            "js",
+            "--name",
+            "大写转换器",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(created.join("plugin.json").is_file());
+    assert!(created.join("main.js").is_file());
+    assert!(created.join("ui.html").is_file());
+
+    // 2. check & run
+    if nuthusk_core::command_on_path("node") {
+        let chk = bin().arg("check").arg(&created).output().unwrap();
+        assert!(
+            chk.status.success(),
+            "{}",
+            String::from_utf8_lossy(&chk.stderr)
+        );
+        assert!(String::from_utf8_lossy(&chk.stdout).contains("JSON-RPC 协议探测通过"));
+
+        let run_out = bin()
+            .arg("run")
+            .arg(&created)
+            .arg("transform")
+            .args(["--input", "nuthusk cli"])
+            .output()
+            .unwrap();
+        assert!(
+            run_out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run_out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&run_out.stdout).trim(),
+            "NUTHUSK CLI"
+        );
+    } else {
+        let chk = bin()
+            .arg("check")
+            .arg(&created)
+            .arg("--no-backend")
+            .output()
+            .unwrap();
+        assert!(
+            chk.status.success(),
+            "{}",
+            String::from_utf8_lossy(&chk.stderr)
+        );
+    }
+
+    // 3. pack
+    let packed_file = dir.join("upper-tool-0.1.0.nut");
+    let p = bin()
+        .current_dir(&dir)
+        .arg("pack")
+        .arg(&created)
+        .output()
+        .unwrap();
+    assert!(p.status.success(), "{}", String::from_utf8_lossy(&p.stderr));
+    assert!(packed_file.is_file());
 }
 
 #[test]

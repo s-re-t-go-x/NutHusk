@@ -1,5 +1,7 @@
 use crate::layout::is_writable;
-use crate::manifest::{is_plugin_local_command, CommandSpec, Manifest, MatchSpec, Permission};
+use crate::manifest::{
+    is_plugin_local_command, ActionSpec, CommandSpec, Manifest, MatchSpec, Permission,
+};
 use crate::package::{self, PackageInfo};
 use crate::runtime::{Prepared, RuntimeManager, MISSING_PREFIX};
 use crate::signature::{self, Trust, TrustedKey, SIGNATURE_FILE};
@@ -73,6 +75,8 @@ pub struct PluginInfo {
     /// 智能内容匹配规则（可选）。
     #[serde(rename = "match")]
     pub r#match: Option<MatchSpec>,
+    /// 插件声明的无头/流水线动作列表。
+    pub actions: Vec<ActionSpec>,
     pub enabled: bool,
     pub error: Option<String>,
     pub has_backend: bool,
@@ -166,9 +170,16 @@ fn spawn_backend(
     match &prepared {
         Prepared::Managed { program, .. } => push_log(
             &log,
-            format!("[宿主] 启动（使用已安装的运行时）: {} {}", program.display(), spec.args.join(" ")),
+            format!(
+                "[宿主] 启动（使用已安装的运行时）: {} {}",
+                program.display(),
+                spec.args.join(" ")
+            ),
         ),
-        _ => push_log(&log, format!("[宿主] 启动: {} {}", spec.command, spec.args.join(" "))),
+        _ => push_log(
+            &log,
+            format!("[宿主] 启动: {} {}", spec.command, spec.args.join(" ")),
+        ),
     }
     let mut child = cmd
         .spawn()
@@ -192,7 +203,9 @@ fn spawn_backend(
                     push_log(&log, format!("[stdout 非 JSON] {line}"));
                     continue;
                 };
-                let Some(rid) = msg.get("id").and_then(Value::as_u64) else { continue };
+                let Some(rid) = msg.get("id").and_then(Value::as_u64) else {
+                    continue;
+                };
                 let outcome = match msg.get("error") {
                     Some(err) => Err(err
                         .get("message")
@@ -260,7 +273,8 @@ impl Backend {
             return Err("插件进程已退出".into());
         }
 
-        let mut line = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string();
+        let mut line =
+            json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string();
         line.push('\n');
         let written = {
             let mut stdin = self.stdin.lock().await;
@@ -311,7 +325,9 @@ impl PluginManager {
             .and_then(|s| serde_json::from_str::<Value>(&s).ok())
             .and_then(|v| {
                 v.get("disabled").and_then(Value::as_array).map(|a| {
-                    a.iter().filter_map(|x| x.as_str().map(String::from)).collect::<HashSet<_>>()
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect::<HashSet<_>>()
                 })
             })
             .unwrap_or_default();
@@ -350,7 +366,9 @@ impl PluginManager {
         let mut found: HashMap<String, Entry> = HashMap::new();
         for g in &groups {
             for base in &g.paths {
-                let Ok(read) = std::fs::read_dir(base) else { continue };
+                let Ok(read) = std::fs::read_dir(base) else {
+                    continue;
+                };
                 let mut items: Vec<_> = read.flatten().collect();
                 items.sort_by_key(|e| e.file_name());
                 for item in items {
@@ -365,7 +383,9 @@ impl PluginManager {
                     }
                     let parsed = std::fs::read_to_string(&file)
                         .map_err(|e| e.to_string())
-                        .and_then(|s| serde_json::from_str::<Manifest>(&s).map_err(|e| e.to_string()))
+                        .and_then(|s| {
+                            serde_json::from_str::<Manifest>(&s).map_err(|e| e.to_string())
+                        })
                         .and_then(|m| m.validate().map(|_| m));
                     let entry = match parsed {
                         Ok(m) => {
@@ -431,6 +451,16 @@ impl PluginManager {
         }
     }
 
+    /// 针对单个插件的开发模式热重载：停止该插件正在运行的后端进程，并重新扫描磁盘上的 plugin.json。
+    pub async fn reload_single(&self, id: &str) {
+        self.stop(id).await;
+        push_log(
+            &self.sink(id),
+            "[宿主] 已执行开发热重载（停止旧后端并重新读取清单）",
+        );
+        self.scan();
+    }
+
     fn group_label(&self, key: &str) -> String {
         self.groups
             .read()
@@ -465,11 +495,14 @@ impl PluginManager {
                     version: e.version.clone(),
                     description: m.map(|m| m.description.clone()).unwrap_or_default(),
                     icon: m.and_then(|m| m.icon.clone()),
-                    category: m.map(|m| m.category.clone()).unwrap_or_else(|| "其他".into()),
+                    category: m
+                        .map(|m| m.category.clone())
+                        .unwrap_or_else(|| "其他".into()),
                     keywords: m.map(|m| m.keywords.clone()).unwrap_or_default(),
                     ui: m.and_then(|m| m.ui.clone()),
                     permissions: m.map(|m| m.permissions.clone()).unwrap_or_default(),
                     r#match: m.and_then(|m| m.r#match.clone()),
+                    actions: m.map(|m| m.actions.clone()).unwrap_or_default(),
                     enabled: !disabled.contains(&e.id),
                     error: e.error.clone(),
                     has_backend: backend.is_some(),
@@ -530,7 +563,11 @@ impl PluginManager {
                 paths: g
                     .paths
                     .iter()
-                    .map(|p| DirPathInfo { path: p.display().to_string(), exists: p.is_dir(), writable: is_writable(p) })
+                    .map(|p| DirPathInfo {
+                        path: p.display().to_string(),
+                        exists: p.is_dir(),
+                        writable: is_writable(p),
+                    })
                     .collect(),
                 plugin_count: entries.values().filter(|e| e.group == g.key).count(),
             })
@@ -614,7 +651,12 @@ impl PluginManager {
     }
 
     fn sink(&self, id: &str) -> LogSink {
-        self.logs.write().unwrap().entry(id.to_string()).or_default().clone()
+        self.logs
+            .write()
+            .unwrap()
+            .entry(id.to_string())
+            .or_default()
+            .clone()
     }
 
     /// 调用插件后端的某个方法。后端在第一次调用时才会启动（懒加载）。
@@ -641,7 +683,12 @@ impl PluginManager {
         backend.call(method, params).await
     }
 
-    fn get_or_start(&self, id: &str, dir: &Path, spec: &CommandSpec) -> Result<Arc<Backend>, String> {
+    fn get_or_start(
+        &self,
+        id: &str,
+        dir: &Path,
+        spec: &CommandSpec,
+    ) -> Result<Arc<Backend>, String> {
         let mut running = self.running.lock().unwrap();
         if let Some(b) = running.get(id) {
             if b.alive.load(Ordering::SeqCst) {
@@ -737,7 +784,9 @@ impl PluginManager {
                 info.backend_found = Some(true);
             }
             if info.backend_found == Some(false) && rt.has_recipe(program) {
-                info.runtime_hint = Some(format!("系统里没有 {program}，首次使用这个插件时可以自动下载运行环境"));
+                info.runtime_hint = Some(format!(
+                    "系统里没有 {program}，首次使用这个插件时可以自动下载运行环境"
+                ));
             }
         }
         if let Ok((label, dir)) = self.install_dir() {
@@ -749,16 +798,25 @@ impl PluginManager {
 
     /// 安装插件包。`expected_sha256` 必须是 `inspect_package` 返回的哈希，
     /// 这样用户确认的就是实际安装的那一份文件。签名无效的包会被拒绝。
-    pub async fn install_package(&self, path: &Path, expected_sha256: &str) -> Result<InstallResult, String> {
+    pub async fn install_package(
+        &self,
+        path: &Path,
+        expected_sha256: &str,
+    ) -> Result<InstallResult, String> {
         let (label, parent) = self.install_dir()?;
-        let (p, sha, trusted) = (path.to_path_buf(), expected_sha256.to_string(), self.trusted.clone());
+        let (p, sha, trusted) = (
+            path.to_path_buf(),
+            expected_sha256.to_string(),
+            self.trusted.clone(),
+        );
 
         // 先读出 id，决定最终位置：目标目录里已有这个插件（哪怕文件夹名不同）就原地替换
         let p2 = p.clone();
         let tr2 = trusted.clone();
-        let id = tokio::task::spawn_blocking(move || package::inspect(&p2, &tr2).map(|i| i.manifest.id))
-            .await
-            .map_err(|e| e.to_string())??;
+        let id =
+            tokio::task::spawn_blocking(move || package::inspect(&p2, &tr2).map(|i| i.manifest.id))
+                .await
+                .map_err(|e| e.to_string())??;
         let dest = {
             let entries = self.entries.read().unwrap();
             match entries.get(&id) {
@@ -768,9 +826,11 @@ impl PluginManager {
         };
 
         let (parent2, dest2) = (parent.clone(), dest.clone());
-        let staged = tokio::task::spawn_blocking(move || package::stage(&p, &sha, &parent2, dest2, &trusted))
-            .await
-            .map_err(|e| e.to_string())??;
+        let staged = tokio::task::spawn_blocking(move || {
+            package::stage(&p, &sha, &parent2, dest2, &trusted)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
         self.stop(&id).await; // 替换文件前先停掉旧后端（Windows 上运行中的文件无法替换）
         let committed = tokio::task::spawn_blocking(move || package::commit(staged))
             .await
@@ -778,8 +838,19 @@ impl PluginManager {
         committed?;
         self.scan();
 
-        let active = self.entries.read().unwrap().get(&id).map(|e| e.dir == dest).unwrap_or(false);
-        Ok(InstallResult { id, path: dest.display().to_string(), group_label: label, active })
+        let active = self
+            .entries
+            .read()
+            .unwrap()
+            .get(&id)
+            .map(|e| e.dir == dest)
+            .unwrap_or(false);
+        Ok(InstallResult {
+            id,
+            path: dest.display().to_string(),
+            group_label: label,
+            active,
+        })
     }
 
     /// 卸载插件（删除它的文件夹）。两个目录里的插件地位相同；没有权限时会给出提示。

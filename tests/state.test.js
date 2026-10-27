@@ -109,3 +109,53 @@ test('loadListWithFallback：新键没有数据时沿用旧键', () => {
   assert.deepEqual(S.loadListWithFallback(store({ old: '["b"]' }), 'new', 'old'), ['b']);
   assert.deepEqual(S.loadListWithFallback(store({}), 'new', 'old'), []);
 });
+
+test('场景工作区（Workspaces）与流水线（Workflows）增删改查与动作提取', () => {
+  let wsList = [];
+  wsList = S.upsertWorkspace(wsList, {
+    id: 'ws-1',
+    name: '前端联调',
+    tabs: ['com.example.json-formatter', 'com.example.hash-calc'],
+    active: 'com.example.json-formatter',
+    splitId: 'com.example.hash-calc',
+  });
+  assert.equal(wsList.length, 1);
+  assert.deepEqual(wsList[0].tabs, ['home', 'com.example.json-formatter', 'com.example.hash-calc']);
+  assert.equal(wsList[0].splitId, 'com.example.hash-calc');
+
+  // 同名更新不新增条目
+  wsList = S.upsertWorkspace(wsList, {
+    id: 'ws-new',
+    name: '前端联调',
+    tabs: ['com.example.json-formatter'],
+    active: 'com.example.json-formatter',
+    splitId: null,
+  });
+  assert.equal(wsList.length, 1);
+  assert.equal(wsList[0].id, 'ws-1');
+  assert.equal(wsList[0].splitId, null);
+
+  wsList = S.removeWorkspace(wsList, 'ws-1');
+  assert.equal(wsList.length, 0);
+
+  let wfList = [];
+  wfList = S.upsertWorkflow(wfList, {
+    id: 'wf-1',
+    name: 'JSON 转 SHA256',
+    description: 'JSON 格式化 → 计算 SHA-256',
+    steps: [
+      { pluginId: 'com.example.json-formatter', actionId: 'format' },
+      { pluginId: 'com.example.hash-calc', actionId: 'sha256' },
+    ],
+  });
+  assert.equal(wfList.length, 1);
+  assert.equal(wfList[0].steps.length, 2);
+
+  const plugins = [
+    P('com.example.json-formatter', 'JSON 格式化', { actions: [{ id: 'format', name: 'JSON 格式化' }] }),
+    P('com.example.off', '禁用工具', { enabled: false, actions: [{ id: 'x', name: 'X' }] }),
+  ];
+  const acts = S.listAvailableActions(plugins);
+  assert.equal(acts.length, 1);
+  assert.equal(acts[0].key, 'com.example.json-formatter:format');
+});

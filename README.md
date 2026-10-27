@@ -7,14 +7,14 @@
 ## 目录结构
 
 ```
-crates/core/       核心库：插件发现与目录优先级、后端进程（stdio JSON-RPC）、插件包安装、签名校验、便携运行时管理、插件市场、配置加载清单（.nutprofile）、设置存储（不依赖 Tauri）
-crates/sign/       nuthusk-sign：生成密钥、给审查过的插件包和索引签名、验证签名
+crates/core/       核心库：插件发现与目录优先级、后端进程（stdio JSON-RPC）、插件包安装、签名校验、便携运行时管理、插件市场、配置加载清单（.nutprofile）、开发者工具链（devkit）、设置存储（不依赖 Tauri）
+crates/sign/       nuthusk-sign：插件脚手架（new）、协议校验（check）、无头运行（run）、打包（pack）、生成密钥与签名验证
 src-tauri/         Tauri 宿主：窗口、系统托盘、plugin:// 协议、命令；trusted_keys.json 是受信任的签名公钥
 src/               壳界面（纯 HTML/JS/CSS，无需打包工具）
 sdk/               插件界面端的 ui.js / ui.css（宿主提供给插件页面）
 nutPlugins/        随程序附带的示例插件：json-formatter（纯前端）、hash-calc（Node 后端）
 examples/          可直接导入试用的 .nut 示例包（源码在 examples/src）
-docs/              PLUGIN_PROTOCOL.md 插件协议；SIGNING.md 签名与审查流程；MARKET.md 插件源与运行时配方规范
+docs/              PLUGIN_PROTOCOL.md 插件协议；SIGNING.md 签名与审查流程；MARKET.md 插件源与运行时配方规范；ROADMAP.md 演进路线图与进度
 tests/             壳界面与插件交互测试（独立的 package.json，不放在根目录，避免影响插件里的 Node 脚本）
 ```
 
@@ -26,29 +26,49 @@ cargo install tauri-cli --version "^2"      # 一次性
 
 cargo tauri dev            # 开发运行
 cargo tauri build          # 打包安装器（打包前先 cargo tauri icon src-tauri/icons/icon.png 生成完整图标集）
+cargo tauri build --no-bundle    # 构建非安装程序
+```
+
+## 插件开发与 CLI 工具链
+
+```bash
+# 生成插件脚手架（支持 --lang js | python | rust | ui-only）
+cargo run -p nuthusk-sign -- new com.example.my-tool --lang js --name "我的工具"
+
+# 校验 plugin.json 并自动启动一次后端测试 JSON-RPC 2.0 响应
+cargo run -p nuthusk-sign -- check ./my-tool
+
+# 在命令行无头运行插件动作（处理输入并输出结果到 stdout）
+cargo run -p nuthusk-sign -- run ./my-tool transform --input "hello"
+
+# 校验后直接打包为 .nut 插件包
+cargo run -p nuthusk-sign -- pack ./my-tool
 ```
 
 ## 测试
 
 ```bash
-cargo test -p nuthusk-core -p nuthusk-sign      # Rust：核心库 + 签名工具（hash-calc 示例需要 node，Python 示例需要 python3）
-cd tests && npm install && npm test             # 界面：jsdom，含壳界面、双栏分屏、跨工具投递、配置清单及示例插件页面逻辑
+cargo test -p nuthusk-core -p nuthusk-sign      # Rust：核心库 + 开发者 CLI 与签名工具（hash-calc 示例需要 node，Python 示例需要 python3）
+cd tests && npm install && npm test             # 界面：jsdom，含壳界面、双栏分屏、跨工具投递、流水线、工作区、配置清单及示例插件页面逻辑
 ```
 
 ## 核心功能
 
-- **多标签、左右双栏分屏与键鼠双轨交互**：
-  - 左侧导航（首页 / 收藏 / 最近使用 / 分类 / 插件下载 / 插件管理 / 设置）、多标签（切换时保留各工具状态，支持鼠标中键关闭与拖拽排序）。
+- **多标签、左右双栏分屏、场景工作区与键鼠双轨交互**：
+  - 左侧导航（首页 / 收藏 / 最近使用 / 分类 / 场景工作区 / 插件下载 / 插件管理 / 设置）、多标签（切换时保留各工具状态，支持鼠标中键关闭与拖拽排序）。
   - **左右双栏分屏**：点击工具顶栏「左右分屏」、按 `Ctrl/Cmd + \`，或按住 `Shift` 点击任意工具标签，即可并排同时使用两个工具，支持一键互换左右视图。
+  - **场景工作区（Named Workspaces）**：在侧边栏「场景工作区」点击 `+ 保存`，即可将当前打开的多标签与左右双栏分屏组合保存为命名场景（如「前端调试」「接口联调」），随时在侧边栏或 `Ctrl+K` 中一键切换恢复。
   - **键盘与鼠标双友好**：切换标签自动聚焦插件主输入框；在插件内按 `Ctrl/Cmd + Enter` 自动触发主操作按钮；顶栏提供窗口置顶（Always on Top）图钉开关；支持最小化常驻系统托盘。
-- **智能内容识别与跨工具投递（`onInput` / `sendTo`）**：
+- **智能内容识别、跨工具投递与快捷流水线（Workflows）**：
   - **智能识别打开**：在 `Ctrl/Cmd + K` 命令面板直接粘贴文本（如 JSON），自动根据插件声明的 `match` 规则嗅探特征并置顶推荐「带内容打开」；将匹配后缀的文件拖入主窗口也可直接用对应工具打开。
-  - **跨工具接力投递**：插件可通过 `nuthusk.sendTo(text)` 将处理结果投递给其他工具；若当前处于左右双栏分屏状态，支持一键将左侧产出直接喂给右侧分屏工具。
-- **后台进程透视与自动生命周期管控**：
+  - **跨工具接力投递**：插件可通过 `nuthusk.sendTo(text)` 将处理结果投递给其他工具或流水线；若当前处于左右双栏分屏状态，支持一键将左侧产出直接喂给右侧分屏工具。
+  - **快捷流水线组合（Pipelines）**：支持将多个插件声明的 `actions` 动作按顺序串联（如 `JSON 格式化 → 计算 SHA-256`，兼容带后端插件与注册了 `nuthusk.onAction` 的纯前端插件），保存后在首页卡片或 `Ctrl+K` 中一键顺序执行。
+- **后台进程透视、自动生命周期管控与开发热重载**：
   - 插件后端采用**懒加载**（首次调用才启动），在工具顶栏、插件管理页（含「运行中」筛选）与底部状态栏实时显示运行状态与进程 `PID`，支持单个停止或一键全部停止。
   - 支持「关闭标签页时自动结束后端进程」与「后端闲置超时自动休眠（1 / 5 / 15 / 30 分钟）」，真正做到空闲零内存占用。
+  - 工具顶栏内置「重载」按钮（快捷键 `Ctrl/Cmd + R`），支持开发插件时一键重启后端并刷新插件界面。
 - **配置加载清单（`.nutprofile`）导入与导出**：
-  - 在「设置 → 文件位置」中可一键导出当前工作台的 `.nutprofile` 清单文件（包含外观与生命周期设置、自定义插件源、已安装便携运行环境、已安装插件及收藏/标签布局）。
+  - 在「设置 → 文件位置」中可一键导出当前工作台的 `.nutprofile` 清单文件（包含外观与生命周期设置、自定义插件源、已安装便携运行环境、已安装插件及收藏/标签/场景工作区/快捷流水线）。
   - 在新设备导入或直接将 `.nutprofile` 拖入窗口，宿主会自动对比缺失项，从对应源批量下载配置运行环境与插件并恢复工作区状态。
 - **数据根目录与优先级**：
   - 两个根目录（AppData、程序目录）地位相同，每个根下统一包含 `nutPlugins`（插件）、`nutRuntimes`（便携运行时）、`nutConfig`（配置）。同 `id` 的插件/运行时取优先级靠前的目录里的（默认 AppData），新内容装到靠前且可写的目录；优先级在设置里调整。

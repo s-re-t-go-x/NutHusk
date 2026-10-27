@@ -223,3 +223,114 @@ export function filterPlugins(plugins, query = '', status = 'all') {
     return [p.name, p.id, p.description, ...(p.keywords ?? [])].some((s) => String(s ?? '').toLowerCase().includes(q));
   });
 }
+
+/* ---------- 场景工作区（Named Workspaces）与轻量流水线（Workflows） ---------- */
+
+export function normalizeWorkspace(ws) {
+  if (!ws || typeof ws !== 'object') return null;
+  const name = String(ws.name ?? '').trim();
+  if (!name) return null;
+  const rawTabs = Array.isArray(ws.tabs) ? ws.tabs.filter((t) => typeof t === 'string' && t) : [];
+  const tabs = [HOME, ...rawTabs.filter((t) => t !== HOME)];
+  const active = typeof ws.active === 'string' && tabs.includes(ws.active) ? ws.active : HOME;
+  const splitId = typeof ws.splitId === 'string' && ws.splitId && ws.splitId !== active ? ws.splitId : null;
+  const id = typeof ws.id === 'string' && ws.id.trim() ? ws.id.trim() : `ws-${name}`;
+  return { id, name, tabs, active, splitId };
+}
+
+export function loadWorkspaces(storage, key = 'nuthusk.workspaces') {
+  try {
+    const raw = JSON.parse(storage.getItem(key) ?? '[]');
+    if (!Array.isArray(raw)) return [];
+    return raw.map(normalizeWorkspace).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+export function saveWorkspaces(storage, list, key = 'nuthusk.workspaces') {
+  try {
+    storage.setItem(key, JSON.stringify(list));
+  } catch { /* 静默忽略 */ }
+}
+
+export function upsertWorkspace(list, ws) {
+  const norm = normalizeWorkspace(ws);
+  if (!norm) return list;
+  const existingIdx = list.findIndex((x) => x.id === norm.id || x.name === norm.name);
+  if (existingIdx >= 0) {
+    const next = [...list];
+    next[existingIdx] = { ...norm, id: list[existingIdx].id };
+    return next;
+  }
+  return [...list, norm];
+}
+
+export function removeWorkspace(list, id) {
+  return list.filter((x) => x.id !== id);
+}
+
+export function normalizeWorkflow(wf) {
+  if (!wf || typeof wf !== 'object') return null;
+  const name = String(wf.name ?? '').trim();
+  if (!name) return null;
+  const rawSteps = Array.isArray(wf.steps) ? wf.steps : [];
+  const steps = rawSteps
+    .filter((s) => s && typeof s.pluginId === 'string' && typeof s.actionId === 'string')
+    .map((s) => ({ pluginId: s.pluginId.trim(), actionId: s.actionId.trim() }))
+    .filter((s) => s.pluginId && s.actionId);
+  if (steps.length === 0) return null;
+  const id = typeof wf.id === 'string' && wf.id.trim() ? wf.id.trim() : `wf-${name}`;
+  const description = typeof wf.description === 'string' ? wf.description.trim() : '';
+  return { id, name, description, steps };
+}
+
+export function loadWorkflows(storage, key = 'nuthusk.workflows') {
+  try {
+    const raw = JSON.parse(storage.getItem(key) ?? '[]');
+    if (!Array.isArray(raw)) return [];
+    return raw.map(normalizeWorkflow).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+export function saveWorkflows(storage, list, key = 'nuthusk.workflows') {
+  try {
+    storage.setItem(key, JSON.stringify(list));
+  } catch { /* 静默忽略 */ }
+}
+
+export function upsertWorkflow(list, wf) {
+  const norm = normalizeWorkflow(wf);
+  if (!norm) return list;
+  const idx = list.findIndex((x) => x.id === norm.id);
+  if (idx >= 0) {
+    const next = [...list];
+    next[idx] = norm;
+    return next;
+  }
+  return [...list, norm];
+}
+
+export function removeWorkflow(list, id) {
+  return list.filter((x) => x.id !== id);
+}
+
+/** 列出当前所有已启用插件声明的可调用动作。 */
+export function listAvailableActions(plugins) {
+  const out = [];
+  for (const p of plugins) {
+    if (!p.enabled || p.error || !Array.isArray(p.actions)) continue;
+    for (const act of p.actions) {
+      if (!act || !act.id) continue;
+      out.push({
+        key: `${p.id}:${act.id}`,
+        plugin: p,
+        action: act,
+        label: `${p.name} · ${act.name || act.id}`,
+      });
+    }
+  }
+  return out;
+}

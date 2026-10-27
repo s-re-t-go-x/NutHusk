@@ -8,10 +8,12 @@ const m = makeTauri({
     mkPlugin('com.example.json-formatter', 'JSON 格式化', {
       keywords: ['json'], icon: 'icon.svg', trust: trust.ok,
       match: { regex: ['^\\s*[\\{\\[][\\s\\S]*[\\}\\]]\\s*$'], prefixes: ['{', '['], extensions: ['json'], minLength: 2, label: '识别为 JSON 文本' },
+      actions: [{ id: 'format', name: 'JSON 格式化', method: 'format', defaultParams: { indent: 2 } }],
     }),
     mkPlugin('com.example.hash-calc', '哈希计算', {
       keywords: ['hash'], permissions: ['network'], hasBackend: true, backendCommand: 'node main.js',
       match: { minLength: 1, maxLength: 10000, label: '计算文本哈希' },
+      actions: [{ id: 'sha256', name: '计算 SHA-256', method: 'hash', defaultParams: { algo: 'sha256' } }],
     }),
     mkPlugin('com.example.pic', '图片压缩', { category: '图片' }),
     mkPlugin('com.example.future', '未来插件', { category: '其他', error: '需要宿主 API ^2.0.0，当前为 1.0.0', icon: null }),
@@ -204,6 +206,77 @@ test('智能内容识别 + 跨工具投递（sendTo） + 左右双栏分屏联�
   key(window, '\\', { ctrlKey: true });
   await tick();
   assert.equal($('stage').classList.contains('split-mode'), false);
+});
+
+test('开发热重载（Ctrl+R）、保存/切换场景工作区与快捷流水线组合', async () => {
+  // 1. 当前处于「JSON 格式化」标签，按 Ctrl+R 触发开发热重载
+  key(window, 'r', { ctrlKey: true });
+  await tick();
+  assert.deepEqual(m.called('reload_single_plugin').pop()[1], { id: 'com.example.json-formatter' });
+  const jsonFrame = $$('iframe.frame').find((f) => f.src.includes('json-formatter'));
+  assert.ok(jsonFrame.src.includes('?t='), '热重载追加时间戳刷新 iframe');
+  jsonFrame.dispatchEvent(new window.Event('load'));
+
+  // 2. 保存当前标签布局为场景工作区「接口调试」
+  document.querySelector('.nav-group-btn').click();
+  await tick();
+  const wsInput = document.querySelector('.dlg-panel input');
+  wsInput.value = '接口调试';
+  $$('.dlg-actions .btn').find((b) => b.textContent === '保存工作区').click();
+  await tick();
+  assert.ok($$('#nav .nav-ws-item').some((el) => el.textContent.includes('接口调试')));
+
+  // 3. 切回首页，新建一条「JSON 格式化 → 计算 SHA-256」流水线并运行
+  navItem('首页').click();
+  await tick();
+  const addWfBtn = $$('#home .sec-head .btn').find((b) => b.textContent.includes('新建流水线'));
+  assert.ok(addWfBtn);
+  addWfBtn.click();
+  await tick();
+  $$('.dlg-actions .btn').find((b) => b.textContent === '保存流水线').click();
+  await tick();
+  assert.equal($$('#home .wf-card').length, 1);
+
+  // 模拟前端插件 JSON 格式化处理 action 消息
+  jsonFrame.contentWindow.postMessage = (msg) => {
+    if (msg.type === 'action') {
+      window.dispatchEvent(new window.MessageEvent('message', {
+        data: { type: 'actionResult', reqId: msg.reqId, result: '{\n  "ok": 1\n}' },
+        source: jsonFrame.contentWindow,
+      }));
+    }
+  };
+
+  $$('#home .wf-card')[0].click();
+  await tick();
+  const runnerInput = document.querySelector('.wf-runner textarea');
+  runnerInput.value = '{"ok":1}';
+  $$('.wf-actions-bar .btn').find((b) => b.textContent.includes('执行流水线')).click();
+  await tick(50);
+  const runnerOutput = $$('.wf-runner textarea')[1];
+  assert.equal(runnerOutput.value, 'RESULT:hash');
+
+  // 4. 在流水线弹窗内点击「投递到工具…」：按 Esc 仅关闭投递面板而不关闭流水线弹窗；选择目标工具后自动关闭流水线弹窗并打开目标工具
+  const sendBtn = $$('.wf-actions-bar .btn').find((b) => b.textContent.includes('投递到工具'));
+  sendBtn.click();
+  await tick();
+  assert.equal($$('.pal-overlay').length, 1);
+  assert.equal($$('.dlg-overlay').length, 1);
+  key(document.querySelector('.pal-input'), 'Escape');
+  await tick();
+  assert.equal($$('.pal-overlay').length, 0, 'Esc 仅关闭顶层投递面板');
+  assert.equal($$('.dlg-overlay').length, 1, '流水线对话框保持打开');
+
+  sendBtn.click();
+  await tick();
+  const palInput = document.querySelector('.pal-input');
+  palInput.value = 'JSON';
+  palInput.dispatchEvent(new window.Event('input'));
+  key(palInput, 'Enter');
+  await tick();
+  assert.equal($$('.pal-overlay').length, 0);
+  assert.equal($$('.dlg-overlay').length, 0, '选择投递目标后自动关闭流水线对话框');
+  assert.equal($$('.tab.active .tab-title')[0].textContent, 'JSON 格式化');
 });
 
 test('快捷键：Ctrl+数字切换、Ctrl+W 关闭并移除 iframe、首页不可关；SDK 转发的快捷键也有效', async () => {

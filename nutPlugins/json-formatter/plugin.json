@@ -21,5 +21,20 @@
     ],
     "minLength": 2,
     "label": "识别为 JSON 文本"
-  }
+  },
+  "actions": [
+    {
+      "id": "format",
+      "name": "JSON 格式化",
+      "method": "format",
+      "description": "美化 JSON 文本（2 空格缩进）",
+      "defaultParams": { "indent": 2 }
+    },
+    {
+      "id": "minify",
+      "name": "JSON 压缩",
+      "method": "minify",
+      "description": "移除空白字符，压缩为单行 JSON"
+    }
+  ]
 }

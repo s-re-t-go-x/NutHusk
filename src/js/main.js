@@ -8,6 +8,7 @@ import { openPalette } from './palette.js';
 import { showDialog, isDialogOpen, closeActiveDialog } from './dialog.js';
 import { importPackages, importDroppedFiles } from './importer.js';
 import { applyProfile } from './profile.js';
+import { openWorkflowRunner, openWorkflowBuilder, promptSaveWorkspace } from './workflow.js';
 
 const { invoke } = window.__TAURI__.core;
 const { HOME, DOWNLOAD, MANAGE, SETTINGS } = S;
@@ -23,13 +24,18 @@ const app = {
   plugins: [],
   favorites: S.loadListWithFallback(localStorage, 'nuthusk.favorites', 'toolbox.favorites'),
   recent: S.loadListWithFallback(localStorage, 'nuthusk.recent', 'toolbox.recent'),
+  workspaces: S.loadWorkspaces(localStorage),
+  workflows: S.loadWorkflows(localStorage),
   tabs: [HOME],
   active: HOME,
   splitId: null, // 右侧双栏分屏中并排展示的插件 id
   homeFilter: 'all', // 'all' | 'favorites' | 'recent' | 'cat:<分类名>'
   frames: new Map(), // 插件 id -> iframe（标签切换时保留，不丢失工具里的状态）
   loadedFrames: new Set(), // 已触发过 load 的插件 id
+  frameLoadWaiters: new Map(), // 插件 id -> [resolve]
   pendingInputs: new Map(), // 插件 id -> 尚未派发的带内容打开 payload
+  pendingActions: new Map(), // reqId -> { resolve, reject, timer }
+  actionSeq: 0,
   manage: { filter: 'all', query: '', openLogs: new Set(), logs: new Map() },
   downloadState: createDownloadState(),
   runtimes: [],
@@ -53,14 +59,11 @@ const statusEl = $('status');
 const byId = (id) => app.plugins.find((p) => p.id === id);
 const isUsable = (p) => p && p.enabled && !p.error;
 
-/* ---------- 主题与顶栏 ---------- */
+/* ---------- 主题与窗口置顶 ---------- */
 
 const darkQuery = window.matchMedia?.('(prefers-color-scheme: dark)');
-const effectiveTheme = () => (app.settings.theme === 'system' ? (darkQuery?.matches ? 'dark' : 'light') : app.settings.theme);
-
-function sendTheme(frame) {
-  frame.contentWindow?.postMessage({ type: 'theme', theme: app.settings.theme }, '*');
-}
+const effectiveTheme = () => app.settings.theme === 'system' ? (darkQuery?.matches ? 'dark' : 'light') : app.settings.theme;
+const sendTheme = (frame) => frame.contentWindow?.postMessage({ type: 'theme', theme: app.settings.theme }, '*');
 
 function applyTheme() {
   const t = app.settings.theme;
@@ -104,10 +107,58 @@ function createFrame(p) {
       app.pendingInputs.delete(p.id);
       frame.contentWindow?.postMessage({ type: 'input', payload }, '*');
     }
+    const waiters = app.frameLoadWaiters.get(p.id);
+    if (waiters) {
+      app.frameLoadWaiters.delete(p.id);
+      for (const fn of waiters) fn(frame);
+    }
   });
   frame.src = pluginUrl(p.id, p.ui);
   stageEl.append(frame);
   app.frames.set(p.id, frame);
+  return frame;
+}
+
+function ensureFrameLoaded(p) {
+  if (!app.frames.has(p.id)) createFrame(p);
+  const frame = app.frames.get(p.id);
+  if (app.loadedFrames.has(p.id)) return Promise.resolve(frame);
+  return new Promise((resolve) => {
+    const list = app.frameLoadWaiters.get(p.id) ?? [];
+    list.push(resolve);
+    app.frameLoadWaiters.set(p.id, list);
+  });
+}
+
+/** 调用单个插件动作（支持带后端进程的插件及注册了 nuthusk.onAction 的纯前端插件）。 */
+async function executePluginAction(p, act, inputText) {
+  const method = act.method || act.id;
+  const params = {
+    ...(act.defaultParams && typeof act.defaultParams === 'object' ? act.defaultParams : {}),
+    text: String(inputText ?? ''),
+  };
+
+  if (p.hasBackend) {
+    const wasRunning = !!p.backendRunning;
+    const res = await invoke('plugin_call', { id: p.id, method, params });
+    if (!wasRunning) await syncPluginStates();
+    return res;
+  }
+
+  if (!p.ui) {
+    throw new Error(`插件「${p.name}」既没有后端也没有界面`);
+  }
+
+  const frame = await ensureFrameLoaded(p);
+  return new Promise((resolve, reject) => {
+    const reqId = `act-${++app.actionSeq}`;
+    const timer = setTimeout(() => {
+      app.pendingActions.delete(reqId);
+      reject(new Error(`插件「${p.name}」执行动作超时`));
+    }, 8000);
+    app.pendingActions.set(reqId, { resolve, reject, timer });
+    frame.contentWindow?.postMessage({ type: 'action', reqId, method, params }, '*');
+  });
 }
 
 function deliverInputToPlugin(id, rawPayload) {
@@ -182,28 +233,29 @@ function toggleSplitPicker() {
   });
 }
 
-function restoreWorkspace(ws) {
+function switchToWorkspaceLayout(ws) {
   if (!ws || typeof ws !== 'object') return;
-  if (Array.isArray(ws.favorites)) {
-    app.favorites = ws.favorites.filter((id) => typeof id === 'string');
-    S.saveList(localStorage, 'nuthusk.favorites', app.favorites);
-  }
-  if (Array.isArray(ws.tabs) && ws.tabs.length) {
-    for (const id of ws.tabs) {
-      if (isPage(id)) {
-        app.tabs = S.openTab(app.tabs, id);
-      } else {
-        const p = byId(id);
-        if (isUsable(p) && p.ui) {
-          app.tabs = S.openTab(app.tabs, id);
-          if (!app.frames.has(id)) createFrame(p);
-        }
+  const targetTabs = new Set([HOME]);
+  for (const id of ws.tabs ?? []) {
+    if (isPage(id)) {
+      targetTabs.add(id);
+    } else {
+      const p = byId(id);
+      if (isUsable(p) && p.ui) {
+        targetTabs.add(id);
+        if (!app.frames.has(id)) createFrame(p);
       }
     }
   }
-  if (typeof ws.active === 'string' && app.tabs.includes(ws.active)) {
-    app.active = ws.active;
+  // 关闭不在目标场景中的工具标签
+  for (const existingId of [...app.tabs]) {
+    if (existingId !== HOME && !targetTabs.has(existingId)) {
+      dropTab(existingId);
+    }
   }
+  app.tabs = [...targetTabs];
+  app.active = typeof ws.active === 'string' && app.tabs.includes(ws.active) ? ws.active : HOME;
+  app.splitId = null;
   if (typeof ws.splitId === 'string' && ws.splitId !== app.active) {
     const sp = byId(ws.splitId);
     if (isUsable(sp) && sp.ui) {
@@ -212,8 +264,25 @@ function restoreWorkspace(ws) {
       app.splitId = ws.splitId;
     }
   }
-  applyTheme();
   renderAll();
+}
+
+function restoreWorkspace(ws) {
+  if (!ws || typeof ws !== 'object') return;
+  if (Array.isArray(ws.favorites)) {
+    app.favorites = ws.favorites.filter((id) => typeof id === 'string');
+    S.saveList(localStorage, 'nuthusk.favorites', app.favorites);
+  }
+  if (Array.isArray(ws.savedWorkspaces)) {
+    app.workspaces = ws.savedWorkspaces.map(S.normalizeWorkspace).filter(Boolean);
+    S.saveWorkspaces(localStorage, app.workspaces);
+  }
+  if (Array.isArray(ws.workflows)) {
+    app.workflows = ws.workflows.map(S.normalizeWorkflow).filter(Boolean);
+    S.saveWorkflows(localStorage, app.workflows);
+  }
+  switchToWorkspaceLayout(ws);
+  applyTheme();
 }
 
 function dropTab(id) {
@@ -273,13 +342,48 @@ function renderSidebar() {
     el('span', { class: 'nav-label', textContent: label }),
     count === undefined ? null : el('span', { class: 'nav-count', textContent: String(count) }));
 
+  const wsGroupHead = el('div', { class: 'nav-group nav-group-row' },
+    el('span', { textContent: '场景工作区' }),
+    el('button', {
+      class: 'nav-group-btn',
+      type: 'button',
+      title: '将当前打开的标签页与分屏保存为命名场景工作区',
+      textContent: '+ 保存',
+      onclick: () => actions.saveCurrentWorkspace(),
+    }));
+
+  const wsItems = app.workspaces.map((ws) => el('div', {
+    class: 'nav-item nav-ws-item',
+    role: 'button',
+    tabIndex: 0,
+    title: `切换到场景工作区：${ws.name}`,
+    onclick: () => actions.switchWorkspace(ws),
+    onkeydown: (e) => {
+      if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
+        e.preventDefault();
+        actions.switchWorkspace(ws);
+      }
+    },
+  },
+    el('span', { class: 'nav-icon' }, icon('layers', 15)),
+    el('span', { class: 'nav-label', textContent: ws.name }),
+    el('button', {
+      class: 'tab-close',
+      type: 'button',
+      title: '删除此工作区',
+      textContent: '×',
+      onclick: (e) => { e.stopPropagation(); actions.deleteWorkspace(ws.id); },
+    })));
+
   const favCount = app.favorites.filter((id) => byId(id)).length;
   navEl.replaceChildren(
     item('all', '首页', 'home'),
     item('favorites', '收藏', 'star', favCount),
     item('recent', '最近使用', 'clock'),
     el('div', { class: 'nav-group', textContent: '分类' }),
-    ...[...cats].sort(([a], [b]) => a.localeCompare(b, 'zh')).map(([c, n]) => item('cat:' + c, c, 'folder', n)));
+    ...[...cats].sort(([a], [b]) => a.localeCompare(b, 'zh')).map(([c, n]) => item('cat:' + c, c, 'folder', n)),
+    wsGroupHead,
+    ...wsItems);
 
   const bad = app.plugins.filter((p) => p.error).length;
   const pageItem = (id, label, iconName, extra = null) => el('button', {
@@ -355,7 +459,7 @@ function renderTabs() {
   }));
 }
 
-/** 工具页顶栏：图标、名称、说明、后端状态、左右分屏控制、来源标识、收藏。 */
+/** 工具页顶栏：图标、名称、说明、后端状态、开发重载、左右分屏控制、来源标识、收藏。 */
 function renderToolhead() {
   const p = isPage(app.active) ? null : byId(app.active);
   toolheadEl.classList.toggle('hidden', !p);
@@ -394,6 +498,12 @@ function renderToolhead() {
       class: 'btn sm', type: 'button', title: '结束当前插件的后台进程', textContent: '停止后端',
       onclick: () => actions.stopBackend(p.id),
     }) : null,
+    el('button', {
+      class: 'btn sm',
+      type: 'button',
+      title: '开发热重载：重新加载插件界面并重启后端进程（Ctrl+R）',
+      onclick: () => actions.reloadPlugin(p.id),
+    }, icon('refresh', 13), ' 重载'),
     splitControls,
     trustTag(p.trust),
     el('button', {
@@ -528,6 +638,120 @@ const actions = {
     await syncPluginStates();
   },
 
+  /** 开发模式热重载：停止插件旧后端、重新读取 plugin.json 清单并刷新插件 iframe。 */
+  async reloadPlugin(id) {
+    try {
+      app.plugins = await invoke('reload_single_plugin', { id });
+      const p = byId(id);
+      if (!p || !isUsable(p)) {
+        await refresh();
+        return;
+      }
+      const frame = app.frames.get(id);
+      if (frame && p.ui) {
+        app.loadedFrames.delete(id);
+        frame.src = `${pluginUrl(p.id, p.ui)}?t=${Date.now()}`;
+      }
+      renderAll();
+      toast(`已重载插件：${p.name}`);
+    } catch (err) {
+      toast(`重载插件失败：${err}`);
+    }
+  },
+
+  async saveCurrentWorkspace() {
+    const toolTabs = app.tabs.filter((id) => !isPage(id));
+    if (toolTabs.length === 0) {
+      toast('请先打开至少一个工具标签，再保存为场景工作区');
+      return;
+    }
+    await promptSaveWorkspace({
+      toolCount: toolTabs.length,
+      hasSplit: !!app.splitId,
+      onSave: (name) => {
+        const ws = {
+          id: `ws-${Date.now()}`,
+          name,
+          tabs: [HOME, ...toolTabs],
+          active: isPage(app.active) ? toolTabs[0] : app.active,
+          splitId: app.splitId,
+        };
+        app.workspaces = S.upsertWorkspace(app.workspaces, ws);
+        S.saveWorkspaces(localStorage, app.workspaces);
+        renderSidebar();
+        toast(`已保存场景工作区：${name}`);
+      },
+    });
+  },
+
+  switchWorkspace(ws) {
+    switchToWorkspaceLayout(ws);
+    toast(`已切换到工作区：${ws.name}`);
+  },
+
+  deleteWorkspace(id) {
+    app.workspaces = S.removeWorkspace(app.workspaces, id);
+    S.saveWorkspaces(localStorage, app.workspaces);
+    renderSidebar();
+    toast('已删除工作区');
+  },
+
+  createWorkflow() {
+    openWorkflowBuilder(null, {
+      plugins: app.plugins,
+      onSave: (wf) => {
+        app.workflows = S.upsertWorkflow(app.workflows, wf);
+        S.saveWorkflows(localStorage, app.workflows);
+        renderAll();
+        toast(`已保存流水线：${wf.name}`);
+      },
+    });
+  },
+
+  editWorkflow(wf) {
+    openWorkflowBuilder(wf, {
+      plugins: app.plugins,
+      onSave: (updated) => {
+        app.workflows = S.upsertWorkflow(app.workflows, updated);
+        S.saveWorkflows(localStorage, app.workflows);
+        renderAll();
+        toast(`已更新流水线：${updated.name}`);
+      },
+    });
+  },
+
+  deleteWorkflow(id) {
+    app.workflows = S.removeWorkflow(app.workflows, id);
+    S.saveWorkflows(localStorage, app.workflows);
+    renderAll();
+    toast('已删除流水线');
+  },
+
+  runWorkflow(wf, initialInput = '') {
+    openWorkflowRunner(wf, initialInput, {
+      plugins: app.plugins,
+      executeAction: executePluginAction,
+      onSendTo: (text, wfName) => {
+        showPalette({
+          payload: { text, sourceId: wf.id, sourceName: wfName },
+          onOpen: (targetId, pl) => {
+            closeActiveDialog(false);
+            openPlugin(targetId, pl);
+          },
+          onSendToSplit: (targetId, pl) => {
+            closeActiveDialog(false);
+            deliverInputToPlugin(targetId, pl);
+            toast(`已投递到右侧分屏：${byId(targetId)?.name ?? targetId}`);
+          },
+          onRunWorkflow: (nextWf, nextText) => {
+            closeActiveDialog(false);
+            actions.runWorkflow(nextWf, nextText);
+          },
+        });
+      },
+    });
+  },
+
   async togglePin() {
     const next = !app.settings.alwaysOnTop;
     try {
@@ -603,6 +827,8 @@ const actions = {
       tabs: app.tabs.filter((id) => id === HOME || !isPage(id)),
       active: isPage(app.active) ? HOME : app.active,
       splitId: app.splitId,
+      savedWorkspaces: app.workspaces,
+      workflows: app.workflows,
     };
     try {
       await invoke('export_profile', { path, name: 'NutHusk 工作台配置', workspace });
@@ -834,9 +1060,13 @@ function showPalette(extra = {}) {
     plugins: app.plugins,
     favorites: app.favorites,
     recent: app.recent,
+    workflows: app.workflows,
+    workspaces: app.workspaces,
     activeId: app.active,
     splitId: app.splitId,
     onOpen: openPlugin,
+    onRunWorkflow: (wf, text) => actions.runWorkflow(wf, text),
+    onSwitchWorkspace: (ws) => actions.switchWorkspace(ws),
     onSendToSplit: (targetId, payload) => {
       deliverInputToPlugin(targetId, payload);
       toast(`已投递到右侧分屏：${byId(targetId)?.name ?? targetId}`);
@@ -868,6 +1098,13 @@ function handleShortcut(e) {
   const k = String(e.key ?? '').toLowerCase();
   if (k === 'k') { showPalette(); return true; }
   if (k === '\\') { toggleSplitPicker(); return true; }
+  if (k === 'r') {
+    if (!isPage(app.active)) {
+      actions.reloadPlugin(app.active);
+      return true;
+    }
+    return false;
+  }
   if (k === 'w' && e.ctrlKey) { if (app.active !== HOME) closeTab(app.active); return true; }
   if (/^[1-9]$/.test(k)) {
     const id = app.tabs[Number(k) - 1];
@@ -1005,6 +1242,16 @@ window.addEventListener('message', async (e) => {
 
   if (d.type === 'key') { handleShortcut(d); return; } // SDK 转发的快捷键（焦点在插件内时）
   if (d.type === 'sendTo') { handleSendTo(id, d.text, d.targetId ?? null); return; } // 插件投递数据到其他工具
+  if (d.type === 'actionResult') {
+    const pending = app.pendingActions.get(d.reqId);
+    if (pending) {
+      app.pendingActions.delete(d.reqId);
+      clearTimeout(pending.timer);
+      if (d.error) pending.reject(new Error(d.error));
+      else pending.resolve(d.result);
+    }
+    return;
+  }
   if (d.type !== 'call') return;
 
   const wasRunning = !!byId(id)?.backendRunning;

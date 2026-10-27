@@ -42,8 +42,52 @@ function card(p, app, actions) {
       })));
 }
 
+function workflowCard(wf, actions) {
+  const runIt = () => actions.runWorkflow?.(wf);
+  return el('div', {
+    class: 'card wf-card',
+    tabIndex: 0,
+    role: 'button',
+    onclick: runIt,
+    onkeydown: (e) => {
+      if (e.target !== e.currentTarget) return;
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        runIt();
+      }
+    },
+  },
+    el('div', { class: 'card-top' },
+      badge({ id: wf.id, name: '⚡' }),
+      el('div', { class: 'wf-card-btns', onclick: (e) => e.stopPropagation() },
+        el('button', {
+          class: 'btn sm',
+          type: 'button',
+          title: '编辑流水线',
+          textContent: '编辑',
+          onclick: () => actions.editWorkflow?.(wf),
+        }),
+        el('button', {
+          class: 'btn sm',
+          type: 'button',
+          title: '删除流水线',
+          textContent: '×',
+          onclick: () => actions.deleteWorkflow?.(wf.id),
+        }))),
+    el('div', { class: 'card-name', textContent: wf.name }),
+    el('div', { class: 'card-desc', textContent: wf.description || `${wf.steps?.length ?? 0} 个串联动作` }),
+    el('div', { class: 'card-foot' },
+      el('span', { class: 'tag ok', textContent: `⚡ ${wf.steps?.length ?? 0} 步流水线` }),
+      el('span', { class: 'spacer' }),
+      el('span', { class: 'muted small', textContent: '点击执行' })));
+}
+
 const grid = (list, app, actions, extra = null) => el('div', { class: 'grid' }, ...list.map((p) => card(p, app, actions)), extra);
-const section = (title, content) => el('section', { class: 'sec' }, el('h2', { textContent: title }), content);
+const section = (title, content, headExtra = null) => el('section', { class: 'sec' },
+  headExtra
+    ? el('div', { class: 'sec-head' }, el('h2', { textContent: title }), headExtra)
+    : el('h2', { textContent: title }),
+  content);
 const empty = (text) => el('div', { class: 'empty', textContent: text });
 
 const importCard = (actions) => el('div', {
@@ -76,6 +120,27 @@ export function renderHome(root, app, actions) {
         el('button', { class: 'chip', type: 'button', onclick: () => actions.open(p.id) }, badge(p, true), p.name)))));
     }
     if (app.settings.showFavorites && favs.length) out.push(section('收藏', grid(favs, app, actions)));
+
+    // 快捷流水线组合（当有已保存流水线，或有插件声明了 actions 时展示）
+    const hasActionPlugins = app.plugins.some((p) => p.enabled && !p.error && Array.isArray(p.actions) && p.actions.length > 0);
+    const workflows = Array.isArray(app.workflows) ? app.workflows : [];
+    if (workflows.length > 0 || hasActionPlugins) {
+      const addWfBtn = el('button', {
+        class: 'btn sm',
+        type: 'button',
+        onclick: () => actions.createWorkflow?.(),
+      }, '+ 新建流水线');
+      const wfContent = workflows.length > 0
+        ? el('div', { class: 'grid' }, ...workflows.map((wf) => workflowCard(wf, actions)))
+        : el('div', { class: 'chips' },
+            el('button', {
+              class: 'chip',
+              type: 'button',
+              onclick: () => actions.createWorkflow?.(),
+            }, icon('zap', 14), '串联多个插件动作（如 JSON 格式化 → 哈希计算）'));
+      out.push(section('快捷流水线', wfContent, addWfBtn));
+    }
+
     out.push(section('全部工具', grid(app.plugins, app, actions, importCard(actions))));
   } else if (f === 'favorites') {
     const favs = existing(app.favorites);

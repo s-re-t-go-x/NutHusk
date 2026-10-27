@@ -104,3 +104,23 @@ fn match_spec_validation_and_api_version_1_1_compatibility() {
     let bad_regex = parse(&format!(r#"{{{BASE},"match":{{"regex":["   "]}}}}"#));
     assert!(bad_regex.validate().unwrap_err().contains("regex"));
 }
+
+#[test]
+fn actions_spec_validation() {
+    let good = parse(&format!(
+        r#"{{{BASE},"actions":[{{"id":"sha256","name":"计算 SHA-256","method":"hash","defaultParams":{{"algo":"sha256"}}}}]}}"#
+    ));
+    good.validate().unwrap();
+    assert_eq!(good.actions.len(), 1);
+    assert_eq!(good.actions[0].effective_method(), "hash");
+
+    let dup = parse(&format!(
+        r#"{{{BASE},"actions":[{{"id":"a","name":"A1"}},{{"id":"a","name":"A2"}}]}}"#
+    ));
+    assert!(dup.validate().unwrap_err().contains("重复"));
+
+    let empty_id = parse(&format!(
+        r#"{{{BASE},"actions":[{{"id":"  ","name":"A"}}]}}"#
+    ));
+    assert!(empty_id.validate().unwrap_err().contains("actions.id"));
+}

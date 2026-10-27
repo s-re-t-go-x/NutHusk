@@ -1,7 +1,7 @@
 //! 配置加载清单文件（`.nutprofile`）的生成、校验与文件系统读写。
 //!
 //! `.nutprofile` 本质是一份 UTF-8 JSON 清单，记录当前工作台的软件设置、插件源、已安装插件列表、
-//! 已安装便携运行时及用户的收藏/标签布局。导出后体积极小（几 KB），分享给他人或在新电脑导入时，
+//! 已安装便携运行时及用户的收藏/标签布局/命名工作区/快捷流水线。导出后体积极小（几 KB），分享给他人或在新电脑导入时，
 //! 宿主可根据清单自动添加源、下载缺失插件与运行时并恢复设置。
 
 use serde::{Deserialize, Serialize};
@@ -41,7 +41,7 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileWorkspace {
     #[serde(default)]
@@ -52,6 +52,12 @@ pub struct ProfileWorkspace {
     pub active: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split_id: Option<String>,
+    /// 用户保存的命名场景工作区列表（可选）。
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub saved_workspaces: Value,
+    /// 用户保存的快捷流水线组合列表（可选）。
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub workflows: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -167,6 +173,8 @@ mod tests {
                 tabs: vec!["home".into(), "com.example.json-formatter".into()],
                 active: Some("com.example.json-formatter".into()),
                 split_id: None,
+                saved_workspaces: Value::Null,
+                workflows: Value::Null,
             }),
         };
 

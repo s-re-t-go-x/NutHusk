@@ -29,7 +29,7 @@ export const trust = {
 
 export const mkPlugin = (id, name, extra = {}) => ({
   id, name, version: '1.0.0', description: name + ' 的说明', icon: null, category: '开发', keywords: [],
-  ui: 'ui.html', permissions: [], match: null, enabled: true, error: null, hasBackend: false, backendCommand: null,
+  ui: 'ui.html', permissions: [], match: null, actions: [], enabled: true, error: null, hasBackend: false, backendCommand: null,
   backendRunning: false, backendPid: null,
   group: 'appdata', groupLabel: 'AppData', path: `/data/plugins/${id}`, trust: trust.none, shadowed: [], ...extra,
 });
@@ -60,6 +60,11 @@ export function makeTauri(init = {}) {
         switch (cmd) {
           case 'list_plugins': return state.plugins.map((p) => ({ ...p }));
           case 'reload_plugins': return state.plugins;
+          case 'reload_single_plugin': {
+            const p = state.plugins.find((x) => x.id === args.id);
+            if (p) { p.backendRunning = false; p.backendPid = null; }
+            return state.plugins.map((x) => ({ ...x }));
+          }
           case 'get_settings': return { ...state.settings };
           case 'patch_settings': Object.assign(state.settings, args.patch); return { ...state.settings };
           case 'set_always_on_top':
