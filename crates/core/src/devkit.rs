@@ -464,20 +464,29 @@ fn call_backend_once(
             "params": params,
         })
     );
-    if let Err(e) = stdin
-        .write_all(req_line.as_bytes())
-        .and_then(|_| stdin.flush())
-    {
+    const MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
+    if req_line.len() as u64 > MAX_RESPONSE_BYTES {
         let _ = child.kill();
         let _ = child.wait();
-        return Err(format!("向后端写入请求失败: {e}"));
+        return Err("后端请求超过 16 MB 上限".into());
     }
-
+    if let Some(mut stderr) = child.stderr.take() {
+        std::thread::spawn(move || { let _ = std::io::copy(&mut stderr, &mut std::io::sink()); });
+    }
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        let res = reader.read_line(&mut line).map(|_| line);
+        let res = (|| -> std::io::Result<String> {
+            // Writing is also covered by the parent's deadline: a backend may never read stdin.
+            stdin.write_all(req_line.as_bytes())?;
+            stdin.flush()?;
+            let mut reader = BufReader::new(stdout).take(MAX_RESPONSE_BYTES + 1);
+            let mut line = String::new();
+            reader.read_line(&mut line)?;
+            if line.len() as u64 > MAX_RESPONSE_BYTES {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "后端响应超过 16 MB 上限"));
+            }
+            Ok(line)
+        })();
         let _ = tx.send(res);
     });
 
@@ -498,13 +507,10 @@ fn call_backend_once(
     };
 
     let msg: Value = serde_json::from_str(line.trim()).map_err(|e| {
-        format!(
-            "后端 stdout 输出不是合法的 JSON: {e}（输出内容: {}）",
-            line.trim()
-        )
+        format!("后端 stdout 输出不是合法的 JSON: {e}（为避免泄露处理内容，未记录原文）")
     })?;
     if msg.get("id").and_then(Value::as_u64) != Some(1) {
-        return Err(format!("后端响应缺少匹配的 id=1: {}", line.trim()));
+        return Err("后端响应缺少匹配的 id=1".to_string());
     }
     if let Some(err) = msg.get("error") {
         if allow_rpc_error {
@@ -519,10 +525,36 @@ fn call_backend_once(
     Ok(msg.get("result").cloned().unwrap_or(Value::Null))
 }
 
+fn reject_private_key(bytes: &[u8], rel: &Path) -> Result<(), String> {
+    let marker = crate::signature::PRIVATE_KEY_PREFIX.as_bytes();
+    if bytes.windows(marker.len()).any(|part| part == marker) {
+        return Err(format!("检测到 NutHusk 私钥，已拒绝打包：{}（请将私钥移出插件目录）", rel.display()));
+    }
+    Ok(())
+}
+
+fn check_pack_secrets(rel: &Path, full: &Path) -> Result<(), String> {
+    let mut file = File::open(full).map_err(|e| format!("读取 {} 失败: {e}", rel.display()))?;
+    let mut chunk = [0u8; 8192];
+    let mut tail = Vec::new();
+    loop {
+        let n = file.read(&mut chunk).map_err(|e| format!("读取 {} 失败: {e}", rel.display()))?;
+        if n == 0 { return Ok(()); }
+        tail.extend_from_slice(&chunk[..n]);
+        reject_private_key(&tail, rel)?;
+        let keep = crate::signature::PRIVATE_KEY_PREFIX.len() - 1;
+        if tail.len() > keep { tail.drain(..tail.len() - keep); }
+    }
+}
+
 /// 将插件目录打包为 `.nut` 文件，并在打包后自动通过 `package::inspect` 校验完整性。
 pub fn pack_plugin_dir(dir: &Path, out_path: Option<&Path>) -> Result<PathBuf, String> {
     let report = check_plugin_dir(dir, false)?;
     let files = collect_plugin_files(dir)?;
+    // Complete the secret preflight before creating or overwriting the output.
+    for (rel, full, _) in &files {
+        if rel != Path::new(SIGNATURE_FILE) { check_pack_secrets(rel, full)?; }
+    }
     let dst = match out_path {
         Some(p) => p.to_path_buf(),
         None => {
@@ -555,13 +587,15 @@ pub fn pack_plugin_dir(dir: &Path, out_path: Option<&Path>) -> Result<PathBuf, S
         if rel_str == SIGNATURE_FILE {
             continue;
         }
-        zw.start_file(&rel_str, options)
-            .map_err(|e| format!("写入压缩包条目失败 {rel_str}: {e}"))?;
         let mut f =
             File::open(&full).map_err(|e| format!("读取文件失败 {}: {e}", full.display()))?;
         let mut buf = Vec::new();
         f.read_to_end(&mut buf)
             .map_err(|e| format!("读取文件失败 {}: {e}", full.display()))?;
+        // Recheck the exact bytes being archived in case a file changed after preflight.
+        reject_private_key(&buf, &rel)?;
+        zw.start_file(&rel_str, options)
+            .map_err(|e| format!("写入压缩包条目失败 {rel_str}: {e}"))?;
         zw.write_all(&buf)
             .map_err(|e| format!("写入压缩包失败 {rel_str}: {e}"))?;
     }
@@ -619,6 +653,34 @@ pub fn run_headless_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pack_rejects_private_material_before_creating_output() {
+        let tmp = std::env::temp_dir().join(format!("nuthusk-pack-secrets-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let dir = scaffold_plugin(&tmp, "com.example.secret-test", None, "ui-only").unwrap();
+        let output = tmp.join("test.nut");
+        // A nested, renamed binary file; marker crosses the streaming scan boundary.
+        fs::create_dir_all(dir.join("assets")).unwrap();
+        let file = dir.join("assets/data.bin");
+        let mut bytes = vec![0xff; 8180];
+        bytes.extend_from_slice(b"nuthusk-ed25519-private:SYNTHETIC_TEST_ONLY");
+        fs::write(&file, bytes).unwrap();
+        let err = pack_plugin_dir(&dir, Some(&output)).unwrap_err();
+        assert!(err.contains("data.bin") && err.contains("私钥"));
+        assert!(!err.contains("SYNTHETIC_TEST_ONLY"));
+        assert!(!output.exists());
+        fs::write(&output, b"existing package").unwrap();
+        assert!(pack_plugin_dir(&dir, Some(&output)).is_err());
+        assert_eq!(fs::read(&output).unwrap(), b"existing package");
+        fs::remove_file(file).unwrap();
+        // The suffix alone is not a secret: ordinary data and public keys remain usable.
+        fs::write(dir.join("ordinary.key"), b"non-secret application data").unwrap();
+        fs::write(dir.join("public.pub"), b"nuthusk-ed25519-public:test").unwrap();
+        pack_plugin_dir(&dir, Some(&output)).unwrap();
+        let _ = fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn scaffold_check_and_pack_ui_only_and_js() {

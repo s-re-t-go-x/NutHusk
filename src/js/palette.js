@@ -1,5 +1,5 @@
 import { el, badge } from './util.js';
-import { searchPlugins, matchPluginsForText } from './state.js';
+import { searchPlugins, matchPluginsForText, matchPluginsForTextAsync } from './state.js';
 
 let current = null;
 
@@ -43,6 +43,9 @@ export function openPalette({
   let items = []; // [{ plugin, payload, hint, onSelect }]
   let rows = [];
   let index = 0;
+  let generation = 0;
+  let matching = null;
+  let pendingEnter = false;
 
   const placeholder = payload
     ? `选择接收「${previewText(payload.text, 24)}」的工具或流水线…`
@@ -68,6 +71,9 @@ export function openPalette({
   const overlay = el('div', { class: 'pal-overlay', onmousedown: (e) => { if (e.target === overlay) close(); } }, panel);
 
   function close() {
+    generation++;
+    matching?.abort();
+    pendingEnter = false;
     overlay.remove();
     current = null;
     prevFocus?.focus?.();
@@ -124,7 +130,7 @@ export function openPalette({
     return { wfMatches, wsMatches };
   }
 
-  function buildItems(rawQuery) {
+  function buildItems(rawQuery, regexMatches = new Set()) {
     const q = rawQuery.trim();
     const qLower = q.toLowerCase();
 
@@ -145,7 +151,7 @@ export function openPalette({
       out.push(...wfMatches);
 
       const matchedMap = new Map(
-        matchPluginsForText(plugins, payload.text).map((m) => [m.plugin.id, m])
+        matchPluginsForText(plugins, payload.text, regexMatches).map((m) => [m.plugin.id, m])
       );
       const candidates = searchPlugins(plugins, q, { favorites, recent })
         .filter((p) => p.ui && p.id !== payload.sourceId);
@@ -186,7 +192,7 @@ export function openPalette({
       ].slice(0, 30);
     }
 
-    const contentMatches = matchPluginsForText(plugins, rawQuery);
+    const contentMatches = matchPluginsForText(plugins, rawQuery, regexMatches);
     const specificMatches = contentMatches.filter((m) => m.specific);
     const out = [];
     const seen = new Set();
@@ -243,8 +249,9 @@ export function openPalette({
     return out.slice(0, 30);
   }
 
-  function update() {
-    items = buildItems(input.value);
+  function draw(rawQuery, regexMatches = new Set()) {
+    const selectedId = index > 0 ? items[index]?.plugin.id : null;
+    items = buildItems(rawQuery, regexMatches);
     rows = items.map((item, i) => el('div', {
       class: 'pal-row' + (i === 0 ? ' sel' : ''),
       role: 'option',
@@ -258,13 +265,33 @@ export function openPalette({
       el('span', { class: item.hintClass || 'tag', textContent: item.hint })));
     index = 0;
     list.replaceChildren(...(rows.length ? rows : [el('div', { class: 'pal-empty', textContent: '没有匹配的工具' })]));
+    if (selectedId) select(Math.max(0, items.findIndex((item) => item.plugin.id === selectedId)));
+  }
+
+  function update() {
+    const request = ++generation;
+    matching?.abort();
+    matching = new AbortController();
+    pendingEnter = false;
+    const rawQuery = input.value;
+    draw(rawQuery);
+    if (mode === 'split' && !payload) return;
+    void matchPluginsForTextAsync(plugins, payload ? payload.text : rawQuery, {
+      signal: matching.signal,
+      onMatch: (matches) => {
+        if (request === generation && overlay.isConnected) {
+          draw(rawQuery, matches);
+          if (pendingEnter && items[index]) choose(items[index]);
+        }
+      },
+    });
   }
 
   input.addEventListener('input', update);
   input.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowDown') { e.preventDefault(); select(index + 1); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); select(index - 1); }
-    else if (e.key === 'Enter') { e.preventDefault(); choose(items[index]); }
+    else if (e.key === 'Enter') { e.preventDefault(); if (items[index]) choose(items[index]); else pendingEnter = true; }
     else if (e.key === 'Escape') { e.preventDefault(); close(); }
   });
 

@@ -71,7 +71,9 @@
   }
 
   window.addEventListener('message', function (e) {
-    var d = e.data || {};
+    if (e.source !== parent) return;
+    var d = e.data;
+    if (!d || typeof d !== 'object' || Array.isArray(d)) return;
     if (d.type === 'theme') {
       // 'system' 表示跟随系统：去掉 data-theme，交给 prefers-color-scheme
       if (d.theme === 'light' || d.theme === 'dark') document.documentElement.setAttribute('data-theme', d.theme);

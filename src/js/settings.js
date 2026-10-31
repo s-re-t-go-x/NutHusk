@@ -21,10 +21,7 @@ const SECTIONS = [
   },
   {
     title: '首页',
-    items: [
-      { type: 'switch', key: 'showRecent', label: '显示「最近使用」', desc: '在首页顶部显示最近打开过的工具。' },
-      { type: 'switch', key: 'showFavorites', label: '显示「收藏」', desc: '在首页显示收藏的工具。' },
-    ],
+    custom: renderHomeSettings,
   },
   { title: '文件位置', custom: renderDirs },
   { title: '运行环境', custom: renderRuntimes },
@@ -52,6 +49,34 @@ function renderItem(item, app, actions) {
     checked: !!value, label: item.label, title: item.label,
     onclick: (e) => actions.patchSettings({ [item.key]: e.target.checked }),
   }));
+}
+
+function renderHomeSettings(app, actions) {
+  const recentCount = (app.recent ?? []).length;
+  return el('div', { class: 'set-box' },
+    renderItem({
+      type: 'switch',
+      key: 'showRecent',
+      label: '显示「最近使用」',
+      desc: '在首页顶部显示最近打开过的工具（工具内输入与处理数据始终保持无痕，不落盘）。',
+    }, app, actions),
+    renderItem({
+      type: 'switch',
+      key: 'showFavorites',
+      label: '显示「收藏」',
+      desc: '在首页显示收藏的工具。',
+    }, app, actions),
+    rowWith(
+      '最近使用记录',
+      recentCount ? `当前记录了最近打开过的 ${recentCount} 个工具 ID。` : '当前没有最近打开工具的记录。',
+      el('button', {
+        class: 'btn sm',
+        type: 'button',
+        disabled: recentCount === 0,
+        textContent: '清空记录',
+        onclick: () => actions.clearRecent?.(),
+      }),
+    ));
 }
 
 function renderDirs(app, actions) {

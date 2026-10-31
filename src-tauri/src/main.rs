@@ -105,8 +105,8 @@ async fn plugin_call(
     id: String,
     method: String,
     params: Value,
-) -> Result<Value, String> {
-    state.manager.invoke(&id, &method, params).await
+) -> Result<Value, nuthusk_core::InvokeError> {
+    state.manager.invoke_checked(&id, &method, params).await
 }
 
 /// 结束指定插件的后端进程。
@@ -516,7 +516,7 @@ fn plugin_csp(network: bool) -> String {
     };
     format!(
         "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; \
-         img-src 'self' data: blob:; font-src 'self' data:; {connect}; form-action 'none'"
+         img-src 'self' data: blob:; font-src 'self' data:; {connect}; form-action 'none'; base-uri 'none'; object-src 'none'"
     )
 }
 
@@ -525,7 +525,8 @@ fn reply(status: u16, mime: &str, body: Vec<u8>, csp: Option<String>) -> http::R
         .status(status)
         .header("Content-Type", mime)
         .header("Access-Control-Allow-Origin", "*")
-        .header("Cache-Control", "no-store");
+        .header("Cache-Control", "no-store")
+        .header("X-Content-Type-Options", "nosniff");
     if let Some(csp) = csp {
         b = b.header("Content-Security-Policy", csp);
     }
@@ -582,10 +583,8 @@ fn serve_plugin(manager: &PluginManager, req: &http::Request<Vec<u8>>) -> http::
     };
 
     let mime = mime_for(&full);
-    let csp = mime
-        .starts_with("text/html")
-        .then(|| plugin_csp(manager.has_permission(id, Permission::Network)));
-    reply(200, mime, bytes, csp)
+    let csp = plugin_csp(manager.has_permission(id, Permission::Network));
+    reply(200, mime, bytes, Some(csp))
 }
 
 /// 数据根目录有两个，优先级可调（默认 AppData 在前，新下载的插件、运行时都写到靠前且可写的根）：
@@ -607,12 +606,6 @@ fn data_roots(app: &tauri::App) -> tauri::Result<Vec<DataRoot>> {
             .and_then(|p| p.parent().map(Path::to_path_buf))
         {
             v.push(dir);
-        }
-        // 安装包的资源目录（macOS / Linux 上与可执行文件所在目录不同）
-        if let Ok(res) = app.path().resource_dir() {
-            if !v.contains(&res) {
-                v.push(res);
-            }
         }
         v
     };
@@ -825,4 +818,30 @@ fn main() {
                 package::clean_temp_dir(&state.drop_dir);
             }
         });
+}
+
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    #[test]
+    fn svg_documents_receive_plugin_csp_and_nosniff() {
+        let root = std::env::temp_dir().join(format!("nuthusk-protocol-security-{}", std::process::id()));
+        let dir = root.join("plugin");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plugin.json"), r#"{"id":"com.test.svg","name":"SVG","version":"1.0.0","apiVersion":"^1.0.0","ui":"ui.svg"}"#).unwrap();
+        std::fs::write(dir.join("ui.svg"), "<svg xmlns='http://www.w3.org/2000/svg'/>").unwrap();
+        let manager = PluginManager::new(vec![nuthusk_core::PluginDir { key: "test".into(), label: "test".into(), paths: vec![root.clone()] }], root.join("state.json"));
+        manager.scan();
+        let req = http::Request::builder().uri("plugin://localhost/com.test.svg/ui.svg").body(Vec::new()).unwrap();
+        let response = serve_plugin(&manager, &req);
+        assert_eq!(response.status(), 200);
+        assert!(response.headers()["Content-Security-Policy"].to_str().unwrap().contains("connect-src 'none'"));
+        assert_eq!(response.headers()["X-Content-Type-Options"], "nosniff");
+        // These exact paths are test-created and remain under the temp test root.
+        std::fs::remove_file(dir.join("ui.svg")).unwrap();
+        std::fs::remove_file(dir.join("plugin.json")).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+        std::fs::remove_dir(&root).unwrap();
+    }
 }

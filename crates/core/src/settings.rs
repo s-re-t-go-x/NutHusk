@@ -1,7 +1,11 @@
 //! 应用设置：保存成一个 JSON 文件。已知的键会校验，未知的键原样保留，方便以后扩展设置项。
 
 use serde_json::{json, Map, Value};
+use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static SAVE_SEQ: AtomicU64 = AtomicU64::new(0);
 use std::sync::Mutex;
 
 pub struct Settings {
@@ -110,17 +114,28 @@ impl Settings {
         }
         {
             let mut data = self.data.lock().unwrap();
+            let mut next = data.clone();
             for (k, v) in obj {
-                data.insert(k.clone(), v.clone());
+                next.insert(k.clone(), v.clone());
             }
-            if let Some(parent) = self.path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+            let parent = self.path.parent().filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| std::path::Path::new("."));
+            std::fs::create_dir_all(parent).map_err(|e| format!("保存设置失败: {e}"))?;
+            let temp = parent.join(format!(".settings-{}-{}.tmp", std::process::id(),
+                SAVE_SEQ.fetch_add(1, Ordering::Relaxed)));
+            let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
+                .open(&temp).map_err(|e| format!("保存设置失败: {e}"))?;
+            let result = (|| -> Result<(), String> {
+                let bytes = serde_json::to_vec_pretty(&next).map_err(|e| e.to_string())?;
+                file.write_all(&bytes).and_then(|_| file.sync_all()).map_err(|e| e.to_string())?;
+                drop(file);
+                std::fs::rename(&temp, &self.path).map_err(|e| e.to_string())
+            })();
+            if let Err(e) = result {
+                let _ = std::fs::remove_file(&temp);
+                return Err(format!("保存设置失败: {e}"));
             }
-            std::fs::write(
-                &self.path,
-                serde_json::to_string_pretty(&*data).unwrap_or_default(),
-            )
-            .map_err(|e| format!("保存设置失败: {e}"))?;
+            *data = next;
         }
         Ok(self.get())
     }

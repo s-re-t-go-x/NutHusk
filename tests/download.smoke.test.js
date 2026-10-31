@@ -111,7 +111,9 @@ test('运行环境缺失拦截与自动下载重试', async () => {
     callCount++;
     if (callCount === 1) {
       // 第一次调用缺少环境
-      throw 'RuntimeMissing:{"name":"python","version":"3.13.2","downloadable":true,"source":"python.org","size":15000000}';
+      throw { code: 'RUNTIME_MISSING', message: '缺少运行环境：python', detail: {
+        name: 'python', version: '3.13.2', downloadable: true, source: 'python.org', size: 15000000,
+      } };
     }
     return { success: true, count: 42 };
   };

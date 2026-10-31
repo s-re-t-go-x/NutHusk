@@ -109,7 +109,7 @@ export function renderHome(root, app, actions) {
   const out = [];
 
   if (app.plugins.length === 0) {
-    out.push(empty('还没有任何插件。点击左下角的「插件管理」导入，或把插件包拖进窗口。'));
+    out.push(empty('还没有任何插件。点击左下角的「插件下载」在线下载，或「插件管理」本地导入，或把插件包拖进窗口。'));
     out.push(el('div', { class: 'grid' }, importCard(actions)));
   } else if (f === 'all') {
     const recent = usable(app.recent);
@@ -147,7 +147,14 @@ export function renderHome(root, app, actions) {
     out.push(section('收藏', favs.length ? grid(favs, app, actions) : empty('点击卡片右上角的 ☆，把常用工具固定在这里。')));
   } else if (f === 'recent') {
     const recent = existing(app.recent);
-    out.push(section('最近使用', recent.length ? grid(recent, app, actions) : empty('还没有使用记录。')));
+    const clearBtn = recent.length
+      ? el('button', {
+          class: 'btn sm',
+          type: 'button',
+          onclick: () => actions.clearRecent?.(),
+        }, '清空记录')
+      : null;
+    out.push(section('最近使用', recent.length ? grid(recent, app, actions) : empty('还没有使用记录。'), clearBtn));
   } else if (f.startsWith('cat:')) {
     const cat = f.slice(4);
     const list = app.plugins.filter((p) => p.category === cat);

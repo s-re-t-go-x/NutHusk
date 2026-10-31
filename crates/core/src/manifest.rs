@@ -179,8 +179,18 @@ pub fn is_valid_id(id: &str) -> bool {
 /// 相对路径必须只含普通路径段，不允许 `..`、绝对路径等。
 pub fn is_safe_relative(p: &str) -> bool {
     let path = Path::new(p);
-    path.components().next().is_some()
-        && path.components().all(|c| matches!(c, Component::Normal(_)))
+    !p.contains('\0') && path.components().next().is_some()
+        && path.components().all(|c| match c {
+            Component::Normal(part) => {
+                let text = part.to_string_lossy();
+                let stem = text.split('.').next().unwrap_or("").to_ascii_uppercase();
+                !text.contains(':') && !text.ends_with(['.', ' '])
+                    && !matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+                    && !(stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT"))
+                        && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+            }
+            _ => false,
+        })
 }
 
 pub fn is_plugin_local_command(cmd: &str) -> bool {

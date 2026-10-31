@@ -3,8 +3,8 @@ use crate::manifest::{
     is_plugin_local_command, ActionSpec, CommandSpec, Manifest, MatchSpec, Permission,
 };
 use crate::package::{self, PackageInfo};
-use crate::runtime::{Prepared, RuntimeManager, MISSING_PREFIX};
-use crate::signature::{self, Trust, TrustedKey, SIGNATURE_FILE};
+use crate::runtime::{Prepared, RuntimeManager, RuntimeMissing};
+use crate::signature::{self, Trust, TrustLevel, TrustedKey, SIGNATURE_FILE};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -13,12 +13,49 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
 
+/// Errors crossing the desktop IPC boundary. Backend messages can only become CallFailed.
+#[derive(Debug, Serialize)]
+#[serde(tag = "code", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum InvokeError {
+    CallFailed { message: String },
+    RuntimeMissing { message: String, detail: RuntimeMissing },
+}
+
+impl From<String> for InvokeError {
+    fn from(message: String) -> Self { Self::CallFailed { message } }
+}
+impl From<&str> for InvokeError {
+    fn from(message: &str) -> Self { message.to_string().into() }
+}
+impl std::fmt::Display for InvokeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CallFailed { message } | Self::RuntimeMissing { message, .. } => f.write_str(message),
+        }
+    }
+}
+impl std::error::Error for InvokeError {}
+
 const CALL_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_RPC_LINE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_STDERR_LINE_BYTES: usize = 64 * 1024;
+const MAX_PENDING_CALLS: usize = 128;
 const MAX_LOG_LINES: usize = 500;
+
+async fn read_limited_line<R: AsyncBufRead + Unpin>(reader: &mut R, limit: usize) -> std::io::Result<Option<String>> {
+    let mut bytes = Vec::new();
+    let n = reader.take(limit as u64 + 1).read_until(b'\n', &mut bytes).await?;
+    if n == 0 { return Ok(None); }
+    if bytes.len() > limit {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "插件输出行超过大小上限"));
+    }
+    String::from_utf8(bytes).map(Some)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
 const MAX_LOG_LINE_CHARS: usize = 2000;
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
@@ -121,7 +158,7 @@ struct Backend {
     started_at: Instant,
     last_used_ms: AtomicU64,
     stdin: AsyncMutex<ChildStdin>,
-    child: AsyncMutex<Child>,
+    child: Arc<AsyncMutex<Child>>,
     pending: Pending,
     next_id: AtomicU64,
     alive: Arc<AtomicBool>,
@@ -136,7 +173,7 @@ fn resolve_command(dir: &Path, command: &str) -> PathBuf {
 }
 
 fn spawn_backend(
-    id: &str,
+    _id: &str,
     dir: &Path,
     spec: &CommandSpec,
     log: LogSink,
@@ -188,6 +225,7 @@ fn spawn_backend(
     let stdin = child.stdin.take().ok_or("无法获取插件 stdin")?;
     let stdout = child.stdout.take().ok_or("无法获取插件 stdout")?;
     let stderr = child.stderr.take().ok_or("无法获取插件 stderr")?;
+    let child = Arc::new(AsyncMutex::new(child));
 
     let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
     let alive = Arc::new(AtomicBool::new(true));
@@ -196,11 +234,17 @@ fn spawn_backend(
         let pending = pending.clone();
         let alive = alive.clone();
         let log = log.clone();
+        let child = child.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut reader = BufReader::new(stdout);
+            let exit_error = loop {
+                let line = match read_limited_line(&mut reader, MAX_RPC_LINE_BYTES).await {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break "插件进程已退出".to_string(),
+                    Err(err) => break format!("插件 stdout 不可用: {err}"),
+                };
                 let Ok(msg) = serde_json::from_str::<Value>(&line) else {
-                    push_log(&log, format!("[stdout 非 JSON] {line}"));
+                    push_log(&log, "[宿主] stdout 包含非 JSON 响应（内容未记录）");
                     continue;
                 };
                 let Some(rid) = msg.get("id").and_then(Value::as_u64) else {
@@ -217,22 +261,28 @@ fn spawn_backend(
                 if let Some(tx) = pending.lock().unwrap().remove(&rid) {
                     let _ = tx.send(outcome);
                 }
-            }
-            // 先标记为已退出，再清空等待中的请求，避免新请求在清空后无人应答
+            };
+            // Closing or oversized stdout must not leave a live backend behind.
             alive.store(false, Ordering::SeqCst);
-            push_log(&log, "[宿主] 后端进程已退出");
+            let _ = child.lock().await.kill().await;
+            push_log(&log, format!("[宿主] {exit_error}"));
             for (_, tx) in pending.lock().unwrap().drain() {
-                let _ = tx.send(Err("插件进程已退出".into()));
+                let _ = tx.send(Err(exit_error.clone()));
             }
         });
     }
 
-    let tag = id.to_string();
     tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            eprintln!("[{tag}] {line}");
-            push_log(&log, line);
+        let mut reader = BufReader::new(stderr);
+        loop {
+            match read_limited_line(&mut reader, MAX_STDERR_LINE_BYTES).await {
+                Ok(Some(line)) => push_log(&log, line.trim_end()),
+                Ok(None) => break,
+                Err(err) => {
+                    push_log(&log, format!("[宿主] stderr 读取已停止: {err}"));
+                    break;
+                }
+            }
         }
     });
 
@@ -241,7 +291,7 @@ fn spawn_backend(
         started_at: Instant::now(),
         last_used_ms: AtomicU64::new(0),
         stdin: AsyncMutex::new(stdin),
-        child: AsyncMutex::new(child),
+        child,
         pending,
         next_id: AtomicU64::new(1),
         alive,
@@ -267,7 +317,11 @@ impl Backend {
         self.touch();
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id, tx);
+        {
+            let mut pending = self.pending.lock().unwrap();
+            if pending.len() >= MAX_PENDING_CALLS { return Err("插件并发请求过多".into()); }
+            pending.insert(id, tx);
+        }
         if !self.alive.load(Ordering::SeqCst) {
             self.pending.lock().unwrap().remove(&id);
             return Err("插件进程已退出".into());
@@ -276,26 +330,32 @@ impl Backend {
         let mut line =
             json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string();
         line.push('\n');
-        let written = {
-            let mut stdin = self.stdin.lock().await;
-            match stdin.write_all(line.as_bytes()).await {
-                Ok(()) => stdin.flush().await,
-                Err(e) => Err(e),
-            }
-        };
-        if let Err(e) = written {
+        if line.len() > MAX_RPC_LINE_BYTES {
             self.pending.lock().unwrap().remove(&id);
-            return Err(format!("写入插件失败: {e}"));
+            return Err("插件请求超过 16 MB 上限".into());
         }
-
-        let res = match tokio::time::timeout(CALL_TIMEOUT, rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err("插件进程已退出".into()),
+        let mut written = false;
+        let request = async {
+            {
+                let mut stdin = self.stdin.lock().await;
+                stdin.write_all(line.as_bytes()).await
+                    .map_err(|e| format!("写入插件失败: {e}"))?;
+                stdin.flush().await.map_err(|e| format!("写入插件失败: {e}"))?;
+            }
+            written = true;
+            rx.await.unwrap_or_else(|_| Err("插件进程已退出".into()))
+        };
+        let res = match tokio::time::timeout(CALL_TIMEOUT, request).await {
+            Ok(result) => result,
             Err(_) => {
-                self.pending.lock().unwrap().remove(&id);
+                // 写入可能只完成了一部分，结束进程以免后续请求接到残缺的 JSON。
+                if !written {
+                    self.kill().await;
+                }
                 Err("插件响应超时".into())
             }
         };
+        self.pending.lock().unwrap().remove(&id);
         self.touch();
         res
     }
@@ -315,6 +375,7 @@ pub struct PluginManager {
     running: Mutex<HashMap<String, Arc<Backend>>>,
     logs: RwLock<HashMap<String, LogSink>>,
     runtimes: Option<Arc<RuntimeManager>>,
+    package_mutation: AsyncMutex<()>,
 }
 
 impl PluginManager {
@@ -340,6 +401,7 @@ impl PluginManager {
             running: Mutex::new(HashMap::new()),
             logs: RwLock::new(HashMap::new()),
             runtimes: None,
+            package_mutation: AsyncMutex::new(()),
         }
     }
 
@@ -405,7 +467,8 @@ impl PluginManager {
                                 dir,
                                 group: g.key.clone(),
                                 manifest: Some(m),
-                                error,
+                                error: error.or_else(|| (trust.level == TrustLevel::Invalid)
+                                    .then(|| format!("签名校验失败：{}", trust.reason))),
                                 trust,
                                 shadowed: Vec::new(),
                             }
@@ -661,11 +724,15 @@ impl PluginManager {
 
     /// 调用插件后端的某个方法。后端在第一次调用时才会启动（懒加载）。
     pub async fn invoke(&self, id: &str, method: &str, params: Value) -> Result<Value, String> {
+        self.invoke_checked(id, method, params).await.map_err(|err| err.to_string())
+    }
+
+    pub async fn invoke_checked(&self, id: &str, method: &str, params: Value) -> Result<Value, InvokeError> {
         let (dir, spec) = {
             let entries = self.entries.read().unwrap();
             let e = entries.get(id).ok_or_else(|| format!("插件不存在: {id}"))?;
             if let Some(err) = &e.error {
-                return Err(format!("插件不可用: {err}"));
+                return Err(format!("插件不可用: {err}").into());
             }
             let spec = e
                 .manifest
@@ -680,7 +747,7 @@ impl PluginManager {
             return Err("插件已禁用".into());
         }
         let backend = self.get_or_start(id, &dir, &spec)?;
-        backend.call(method, params).await
+        backend.call(method, params).await.map_err(InvokeError::from)
     }
 
     fn get_or_start(
@@ -688,7 +755,7 @@ impl PluginManager {
         id: &str,
         dir: &Path,
         spec: &CommandSpec,
-    ) -> Result<Arc<Backend>, String> {
+    ) -> Result<Arc<Backend>, InvokeError> {
         let mut running = self.running.lock().unwrap();
         if let Some(b) = running.get(id) {
             if b.alive.load(Ordering::SeqCst) {
@@ -696,6 +763,18 @@ impl PluginManager {
             }
             running.remove(id); // 进程已崩溃或退出，下面重新拉起
         }
+        // Recheck immediately before a new process starts, including edits made since scan().
+        let signature = std::fs::read_to_string(dir.join(SIGNATURE_FILE)).ok();
+        let entries = self.entries.read().unwrap();
+        let entry = entries.get(id).ok_or("插件不存在")?;
+        let trust = signature::verify(signature.as_deref(), &entry.id, &entry.version,
+            || signature::digest_dir(dir), &self.trusted);
+        if trust.level == TrustLevel::Invalid
+            || (entry.trust.level == TrustLevel::Trusted && trust.level != TrustLevel::Trusted)
+        {
+            return Err(format!("签名校验失败，已拒绝启动：{}", trust.reason).into());
+        }
+        drop(entries);
         let log = self.sink(id);
         let prepared = match (&self.runtimes, is_plugin_local_command(&spec.command)) {
             (Some(rt), false) => rt.prepare(&spec.command),
@@ -703,14 +782,16 @@ impl PluginManager {
         };
         if let Prepared::Missing(m) = &prepared {
             push_log(&log, format!("[宿主] 缺少运行时: {} {}", m.name, m.version));
-            let detail = serde_json::to_string(m).unwrap_or_default();
-            return Err(format!("{MISSING_PREFIX}{detail}"));
+            return Err(InvokeError::RuntimeMissing {
+                message: format!("缺少运行环境：{} {}", m.name, m.version),
+                detail: m.clone(),
+            });
         }
         let backend = match spawn_backend(id, dir, spec, log.clone(), prepared) {
             Ok(b) => Arc::new(b),
             Err(e) => {
                 push_log(&log, format!("[宿主] {e}"));
-                return Err(e);
+                return Err(e.into());
             }
         };
         running.insert(id.to_string(), backend.clone());
@@ -803,6 +884,7 @@ impl PluginManager {
         path: &Path,
         expected_sha256: &str,
     ) -> Result<InstallResult, String> {
+        let _mutation = self.package_mutation.lock().await;
         let (label, parent) = self.install_dir()?;
         let (p, sha, trusted) = (
             path.to_path_buf(),
@@ -856,6 +938,7 @@ impl PluginManager {
     /// 卸载插件（删除它的文件夹）。两个目录里的插件地位相同；没有权限时会给出提示。
     /// 损坏的、无法识别的插件目录也可以删除。
     pub async fn uninstall(&self, id: &str) -> Result<(), String> {
+        let _mutation = self.package_mutation.lock().await;
         let dir = {
             let entries = self.entries.read().unwrap();
             entries.get(id).ok_or("插件不存在")?.dir.clone()

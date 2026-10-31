@@ -1,0 +1,35 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { JSDOM } from 'jsdom';
+
+const script = readFileSync(new URL('../sdk/ui.js', import.meta.url), 'utf8');
+test('SDK 仅信任父窗口，拒绝伪造响应、动作及输入消息', async () => {
+  const dom = new JSDOM('<iframe></iframe><iframe></iframe>', { runScripts: 'dangerously' });
+  const parent = dom.window;
+  const [frame, other] = [...parent.document.querySelectorAll('iframe')].map((f) => f.contentWindow);
+  const requests = [];
+  parent.postMessage = (msg) => requests.push(msg);
+  frame.eval(script);
+  const send = (source, data) => frame.dispatchEvent(new frame.MessageEvent('message', { source, data }));
+  let input = null, acted = 0, resolved = false;
+  frame.nuthusk.onInput((text) => { input = text; });
+  frame.nuthusk.onAction(() => { acted++; return 'ok'; });
+  const result = frame.nuthusk.call('echo', { text: 'hello' }).then((r) => { resolved = true; return r; });
+  const reqId = requests[0].reqId;
+  send(other, { reqId, result: 'forged' });
+  send(other, { type: 'input', payload: { text: 'forged' } });
+  send(other, { type: 'action', reqId: 99, method: 'execute' });
+  await Promise.resolve();
+  assert.equal(resolved, false);
+  assert.equal(input, null);
+  assert.equal(acted, 0);
+  send(parent, { type: 'input', payload: { text: 'real input' } });
+  send(parent, { type: 'action', reqId: 100, method: 'execute' });
+  send(parent, { reqId, result: 'real result' });
+  assert.equal(await result, 'real result');
+  await Promise.resolve();
+  assert.equal(input, 'real input');
+  assert.equal(acted, 1);
+  dom.window.close();
+});

@@ -18,12 +18,12 @@ pub use devkit::{
     check_plugin_dir, pack_plugin_dir, run_headless_action, scaffold_plugin, CheckReport,
 };
 pub use layout::{DataRoot, RootInfo, RootPathInfo, Roots, CONFIG_DIR, PLUGINS_DIR, RUNTIMES_DIR};
-pub use manager::{DirInfo, DirPathInfo, InstallResult, PluginDir, PluginInfo, PluginManager};
+pub use manager::{InvokeError, DirInfo, DirPathInfo, InstallResult, PluginDir, PluginInfo, PluginManager};
 pub use manifest::{
     has_icon_extension, is_valid_id, ActionSpec, BackendSpec, CommandSpec, Manifest, MatchSpec,
     Permission, HOST_API_VERSION, ICON_EXTENSIONS,
 };
-pub use market::{IndexEntry, IndexResult, Market, Source, OFFICIAL_ID, OFFICIAL_INDEX_URL};
+pub use market::{IndexEntry, IndexResult, Market, Source, OFFICIAL_ID};
 pub use package::{command_on_path, PackageInfo};
 pub use profile::{
     NutProfile, ProfilePlugin, ProfileSource, ProfileWorkspace, PROFILE_FORMAT, PROFILE_VERSION,

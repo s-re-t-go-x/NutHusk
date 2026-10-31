@@ -4,7 +4,7 @@
 //! 安全措施：拒绝路径穿越与符号链接；限制条目数、单文件和总解压大小（按实际读出的字节计，不信任声明值）；
 //! 先解压到临时目录，通过后再整体替换，失败时回滚；签名无效的包拒绝安装。
 
-use crate::manifest::{is_plugin_local_command, Manifest};
+use crate::manifest::{is_plugin_local_command, is_safe_relative, Manifest};
 use crate::signature::{self, digest_from_hashes, hash_reader, Trust, TrustLevel, TrustedKey, SIGNATURE_FILE};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::Serialize;
@@ -92,6 +92,9 @@ fn read_entry(archive: &mut zip::ZipArchive<File>, target: &Path, limit: u64) ->
 
 fn open(path: &Path) -> Result<Opened, String> {
     let file = File::open(path).map_err(|e| format!("无法打开文件: {e}"))?;
+    if file.metadata().map_err(|e| e.to_string())?.len() > MAX_PACKAGE_BYTES as u64 {
+        return Err("插件包超过 300 MB 上限".into());
+    }
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| format!("不是有效的插件包（需要 zip 格式）: {e}"))?;
     if archive.len() > MAX_ENTRIES {
@@ -99,17 +102,27 @@ fn open(path: &Path) -> Result<Opened, String> {
     }
 
     let mut entries: Vec<(PathBuf, bool, u64)> = Vec::with_capacity(archive.len());
+    let mut seen_paths = HashSet::new();
     let mut total = 0u64;
     for i in 0..archive.len() {
         let f = archive.by_index(i).map_err(|e| format!("读取包内条目失败: {e}"))?;
+        let entry_name = f.name().map_err(|e| format!("包内文件名无法解析: {e}"))?.into_owned();
         let name = f
             .enclosed_name()
-            .ok_or_else(|| format!("包内含不安全的路径: {}", f.name()))?;
+            .ok_or_else(|| format!("包内含不安全的路径: {}", entry_name))?;
+        let normalized = rel_string(&name);
+        let path_key = if cfg!(windows) { normalized.to_ascii_lowercase() } else { normalized.clone() };
+        if entry_name.contains('\\') || !is_safe_relative(entry_name.trim_end_matches('/')) || !is_safe_relative(&normalized) {
+            return Err(format!("包内含不安全的路径: {}", entry_name));
+        }
+        if !seen_paths.insert(path_key) {
+            return Err(format!("包内含重复路径: {}", entry_name));
+        }
         if is_symlink_mode(f.unix_mode()) {
-            return Err(format!("包内不允许符号链接: {}", f.name()));
+            return Err(format!("包内不允许符号链接: {}", entry_name));
         }
         if f.size() > MAX_FILE_BYTES {
-            return Err(format!("包内文件过大: {}", f.name()));
+            return Err(format!("包内文件过大: {}", entry_name));
         }
         total = total.saturating_add(f.size());
         entries.push((name, f.is_dir(), f.size()));
@@ -390,8 +403,23 @@ pub fn stage(
     trusted: &[TrustedKey],
 ) -> Result<Staged, String> {
     fs::create_dir_all(parent).map_err(|e| format!("无法创建插件目录: {e}"))?;
-    let copy = parent.join(format!(".pkg-{}.tmp", std::process::id()));
-    fs::copy(path, &copy).map_err(|e| format!("无法读取插件包: {e}"))?;
+    let seq = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let copy = parent.join(format!(".pkg-{}-{seq}.tmp", std::process::id()));
+    let mut input = File::open(path).map_err(|e| format!("无法读取插件包: {e}"))?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+    let mut output = options.open(&copy).map_err(|e| format!("无法暂存插件包: {e}"))?;
+    let copied = io::copy(&mut Read::by_ref(&mut input).take(MAX_PACKAGE_BYTES as u64 + 1), &mut output);
+    drop(output);
+    match copied {
+        Ok(n) if n <= MAX_PACKAGE_BYTES as u64 => {},
+        result => {
+            let _ = fs::remove_file(&copy);
+            return Err(match result { Ok(_) => "插件包超过 300 MB 上限".into(), Err(e) => format!("无法暂存插件包: {e}") });
+        }
+    }
 
     let result = (|| {
         let actual = sha256_file(&copy)?;

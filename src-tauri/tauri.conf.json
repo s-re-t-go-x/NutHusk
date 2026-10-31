@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "NutHusk",
-  "version": "0.1.0",
-  "identifier": "com.example.NutHusk",
+  "version": "1.0.1",
+  "identifier": "com.s-re-t-go-x.NutHusk",
   "build": {
     "frontendDist": "../src"
   },
@@ -20,21 +20,17 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: plugin: http://plugin.localhost; connect-src ipc: http://ipc.localhost; frame-src plugin: http://plugin.localhost"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: plugin: http://plugin.localhost; connect-src ipc: http://ipc.localhost; worker-src 'self' blob:; frame-src plugin: http://plugin.localhost"
     }
   },
   "bundle": {
-    "active": true,
-    "targets": "all",
+    "active": false,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ],
-    "resources": {
-      "../nutPlugins/": "nutPlugins/"
-    }
+    ]
   }
 }

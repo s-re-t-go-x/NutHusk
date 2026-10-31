@@ -1,4 +1,4 @@
-import { el, badge, icon, trustTag, fmtSize, toast } from './util.js';
+import { el, badge, icon, trustTag, fmtSize } from './util.js';
 import { showDialog } from './dialog.js';
 
 export function createDownloadState() {

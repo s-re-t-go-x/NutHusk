@@ -381,3 +381,34 @@ fn dropped_packages_are_staged_safely_in_temp_dir() {
     nuthusk_core::package::clean_temp_dir(&dir);
     assert!(!dir.exists());
 }
+
+
+#[tokio::test]
+async fn rejects_portable_path_aliases_and_duplicate_zip_entries() {
+    let root = tmp("path-aliases");
+    let m = manager(&root);
+    for unsafe_name in ["ui.html:payload", "CON.txt", "file.", "folder/file ", "a/../hidden.txt", "dir\\escape.txt"] {
+        let path = root.join("unsafe.nut");
+        make_zip(&path, &[("plugin.json", &manifest("com.test.alias", "1.0.0", "")), ("ui.html", "ok"), (unsafe_name, "bad")]);
+        assert!(m.inspect_package(&path).await.is_err(), "accepted {unsafe_name}");
+    }
+    // Duplicate logical file paths are rejected even when the archive uses ./ aliases.
+    let path = root.join("duplicate.nut");
+    make_zip(&path, &[("plugin.json", &manifest("com.test.alias", "1.0.0", "")), ("ui.html", "ok"), ("folder/data.txt", "first"), ("folder/./data.txt", "second")]);
+    assert!(m.inspect_package(&path).await.unwrap_err().contains("重复路径"));
+}
+
+#[tokio::test]
+async fn concurrent_package_installs_do_not_share_staging_files() {
+    let root = tmp("parallel-installs");
+    let m = manager(&root);
+    let (a, b) = (root.join("a.nut"), root.join("b.nut"));
+    backend_pkg(&a, "com.test.parallel-a", "1.0.0");
+    backend_pkg(&b, "com.test.parallel-b", "2.0.0");
+    let sha_a = m.inspect_package(&a).await.unwrap().sha256;
+    let sha_b = m.inspect_package(&b).await.unwrap().sha256;
+    let (a_result, b_result) = tokio::join!(m.install_package(&a, &sha_a), m.install_package(&b, &sha_b));
+    assert!(a_result.is_ok(), "{a_result:?}");
+    assert!(b_result.is_ok(), "{b_result:?}");
+    assert_eq!(m.list().len(), 2);
+}

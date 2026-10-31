@@ -1,6 +1,6 @@
 # 插件签名与可信来源
 
-目标：第三方开发的插件提交给你之后，**只有你审查过并签名的，安装后才会标注绿色「可信来源」**；没有签名的一律标黄色「未经安全验证」。
+目标：第三方开发的插件提交给你之后，**只有你审查过并签名的，安装后才会标注绿色「可信来源」**；没有签名的一律标黄色「未经安全验证」。供团队内部用。
 
 ## 它保证什么，不保证什么
 
@@ -13,14 +13,16 @@
 
 ## 一次性准备
 
-在项目根目录：
+先在项目根目录构建 CLI；生成密钥时切换到仓库和插件目录之外的私有目录：
 
 ```bash
-# 1. 编译签名工具
-cargo build --release -p nuthusk-sign        # 生成 target/release/nuthusk-sign
+# 1. 编译 CLI 工具
+cargo build --release -p nuthusk-cli         # 生成 target/release/nuthusk-cli
 
-# 2. 生成你的密钥对
-nuthusk-sign keygen my-signing-key
+# 2. 切换到你自行创建的私有签名目录（不要使用仓库或插件目录）
+# 确保 nuthusk-cli 已加入 PATH，或使用它的绝对路径
+cd <私有签名目录>
+nuthusk-cli keygen my-signing-key
 #   my-signing-key.key   私钥：务必保密，不要提交到仓库，也不要放进安装包
 #   my-signing-key.pub   公钥
 ```
@@ -44,7 +46,7 @@ nuthusk-sign keygen my-signing-key
 收到第三方提交的插件包后：
 
 ```bash
-nuthusk-sign sign their-plugin.nut --key my-signing-key.key
+nuthusk-cli sign their-plugin.nut --key my-signing-key.key
 ```
 
 工具会先列出插件的名称、版本、声明的权限、后端命令和内容摘要，并要求你输入 `yes`，表示你已经审查完毕。输出是 `their-plugin.signed.nut`，不会覆盖原文件。把这个文件发给用户。
@@ -52,7 +54,7 @@ nuthusk-sign sign their-plugin.nut --key my-signing-key.key
 验证：
 
 ```bash
-nuthusk-sign verify their-plugin.signed.nut --keys src-tauri/trusted_keys.json
+nuthusk-cli verify their-plugin.signed.nut --keys src-tauri/trusted_keys.json
 # 可信来源：由「你的名字」签名，内容未被改动
 ```
 

@@ -1,3 +1,5 @@
+import { matchRegexTasks } from './regex-matcher.js';
+
 // 纯函数：不依赖 DOM，方便单元测试。
 
 export const HOME = 'home';
@@ -132,7 +134,7 @@ function looksLikeJson(text) {
  * 根据输入文本智能匹配可处理该内容的插件。
  * 返回 [{ plugin, label, specific, score }]，按精确匹配优先排序。
  */
-export function matchPluginsForText(plugins, rawText) {
+export function matchPluginsForText(plugins, rawText, regexMatches = new Set()) {
   const text = String(rawText ?? '');
   const trimmed = text.trim();
   if (!trimmed) return [];
@@ -158,16 +160,9 @@ export function matchPluginsForText(plugins, rawText) {
         matched = true;
         specific = true;
       }
-      if (!matched && hasRegex) {
-        for (const pat of m.regex) {
-          try {
-            if (new RegExp(pat).test(trimmed)) {
-              matched = true;
-              specific = true;
-              break;
-            }
-          } catch { /* 忽略无效正则 */ }
-        }
+      if (!matched && hasRegex && regexMatches.has(p.id)) {
+        matched = true;
+        specific = true;
       }
       if (!hasPrefixes && !hasRegex && (m.minLength != null || m.maxLength != null)) {
         matched = true;
@@ -196,6 +191,27 @@ export function matchPluginsForText(plugins, rawText) {
   }
 
   return out.sort((a, b) => b.score - a.score || a.plugin.name.localeCompare(b.plugin.name, 'zh'));
+}
+
+/** Full text matching, including isolated regex evaluation. Prefix/JSON results remain synchronous. */
+export async function matchPluginsForTextAsync(plugins, rawText, options = {}) {
+  const text = String(rawText ?? '');
+  const trimmed = text.trim();
+  const tasks = [];
+  if (trimmed) {
+    for (const p of plugins) {
+      const m = p.match;
+      if (!p.enabled || p.error || !p.ui || !m) continue;
+      if (m.minLength != null && text.length < m.minLength) continue;
+      if (m.maxLength != null && text.length > m.maxLength) continue;
+      if (m.prefixes?.some((prefix) => trimmed.toLowerCase().startsWith(String(prefix).toLowerCase()))) continue;
+      for (const pattern of m.regex ?? []) {
+        if (typeof pattern === 'string') tasks.push({ key: p.id, pattern });
+      }
+    }
+  }
+  const matches = await matchRegexTasks(tasks, trimmed, options);
+  return matchPluginsForText(plugins, rawText, matches);
 }
 
 /** 根据文件名匹配声明了对应 extensions 的插件。 */

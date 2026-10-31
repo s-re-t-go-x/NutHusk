@@ -275,7 +275,11 @@ test('配置加载清单（.nutprofile）：导出、差异计算与拖入自动
   dlgBtn('开始同步与恢复').click();
   await tick(80);
 
-  // 2. 自动下载缺失插件后，弹出标准的插件包安全安装确认框
+  // 2. 配置新增的私有源需要完整 URL 确认，之后仍走标准包安装确认。
+  assert.ok(document.querySelector('.dlg-panel').textContent.includes('https://team.example.com/index.json'));
+  assert.ok(document.querySelector('.dlg-panel').textContent.includes('此源由本次配置清单添加'));
+  dlgBtn('确认来源并下载').click();
+  await tick(80);
   assert.ok(document.querySelector('.dlg-panel').textContent.includes('远端工具'));
   dlgBtn('安装').click();
   await tick(80);

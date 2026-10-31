@@ -18,14 +18,25 @@ use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 pub const OFFICIAL_ID: &str = "official";
-/// 官方插件源的索引地址。仓库结构见 docs/MARKET.md。
-pub const OFFICIAL_INDEX_URL: &str =
-    "https://raw.githubusercontent.com/nuthusk/nuthusk-plugins/main/index.json";
-/// 官方源允许的域名（含子域名；GitHub Release 会跳转到 githubusercontent.com 下的子域名）。
-const OFFICIAL_HOSTS: [&str; 2] = ["github.com", "githubusercontent.com"];
+// 与 runtimes.json 一样随程序编译，用户源不能修改官方信任策略。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OfficialSourceConfig {
+    name: String,
+    url: String,
+    allowed_hosts: Vec<String>,
+}
+
+fn official_config() -> &'static OfficialSourceConfig {
+    static CONFIG: OnceLock<OfficialSourceConfig> = OnceLock::new();
+    CONFIG.get_or_init(|| {
+        serde_json::from_str(include_str!("market.json")).expect("内置 market.json 格式无效")
+    })
+}
+
 const MAX_INDEX_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_ENTRIES: usize = 500;
 const SOURCES_FILE: &str = "sources.json";
@@ -73,8 +84,8 @@ pub struct IndexResult {
     pub error: Option<String>,
 }
 
-fn official_hosts() -> Vec<String> {
-    OFFICIAL_HOSTS.iter().map(|s| s.to_string()).collect()
+fn official_hosts() -> &'static [String] {
+    &official_config().allowed_hosts
 }
 
 fn simple_id(id: &str) -> bool {
@@ -133,7 +144,7 @@ pub(crate) fn process_index(
         if !simple_id(&e.id) {
             return Err(format!("索引里的插件 id 不合法: {}", e.id));
         }
-        http::check_url(&e.url, if source.official { Some(&hosts) } else { None })
+        http::check_url(&e.url, if source.official { Some(hosts) } else { None })
             .map_err(|err| format!("「{}」的下载地址不可用: {err}", e.id))?;
         match &e.sha256 {
             Some(h) if h.len() != 64 || !h.chars().all(|c| c.is_ascii_hexdigit()) => {
@@ -147,13 +158,17 @@ pub(crate) fn process_index(
     Ok((name, entries, trust))
 }
 
+#[derive(Default, Deserialize)]
+struct SourcesFile {
+    sources: Vec<Source>,
+}
+
 fn read_sources(dir: &Path) -> Vec<Source> {
-    fs::read_to_string(dir.join(SOURCES_FILE))
+    fs::read(dir.join(SOURCES_FILE))
         .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .and_then(|v| v.get("sources").cloned())
-        .and_then(|v| serde_json::from_value::<Vec<Source>>(v).ok())
+        .and_then(|bytes| serde_json::from_slice::<SourcesFile>(&bytes).ok())
         .unwrap_or_default()
+        .sources
 }
 
 fn write_sources(dir: &Path, sources: &[Source]) -> Result<(), String> {
@@ -180,8 +195,8 @@ impl Market {
     pub fn official() -> Source {
         Source {
             id: OFFICIAL_ID.into(),
-            name: "官方插件源".into(),
-            url: OFFICIAL_INDEX_URL.into(),
+            name: official_config().name.clone(),
+            url: official_config().url.clone(),
             official: true,
         }
     }
@@ -261,13 +276,12 @@ impl Market {
     pub fn fetch_index(&self, source: &Source) -> Result<IndexResult, String> {
         let allowed = source.official.then(official_hosts);
         let sig_url = format!("{}.sig", source.url);
-        let fetched =
-            http::fetch_bytes(&source.url, MAX_INDEX_BYTES, allowed.as_deref()).map(|bytes| {
-                let sig = http::fetch_bytes(&sig_url, 16 * 1024, allowed.as_deref())
-                    .ok()
-                    .map(|b| String::from_utf8_lossy(&b).into_owned());
-                (bytes, sig)
-            });
+        let fetched = http::fetch_bytes(&source.url, MAX_INDEX_BYTES, allowed).map(|bytes| {
+            let sig = http::fetch_bytes(&sig_url, 16 * 1024, allowed)
+                .ok()
+                .map(|b| String::from_utf8_lossy(&b).into_owned());
+            (bytes, sig)
+        });
         match fetched {
             Ok((bytes, sig)) => {
                 let (name, entries, trust) =
@@ -329,7 +343,7 @@ impl Market {
             return Err("官方源的下载必须提供 sha256".into());
         }
         let hosts = official_hosts();
-        let allowed = official_only.then_some(hosts.as_slice());
+        let allowed = official_only.then_some(hosts);
         http::check_url(url, allowed)?;
 
         let file_name = url::Url::parse(url)
@@ -374,6 +388,24 @@ impl Market {
 mod tests {
     use super::*;
     use crate::layout::DataRoot;
+
+    #[test]
+    fn builtin_source_config_is_valid() {
+        let config = official_config();
+        assert!(!config.name.trim().is_empty());
+        assert!(!config.allowed_hosts.is_empty());
+        for host in &config.allowed_hosts {
+            assert_eq!(
+                http::check_url(&format!("https://{host}"), None).unwrap(),
+                *host
+            );
+        }
+        http::check_url(&config.url, Some(official_hosts())).unwrap();
+        let source = Market::official();
+        assert!(source.official);
+        assert_eq!(source.url, config.url);
+        assert_eq!(source.name, config.name);
+    }
 
     fn keypair() -> ([u8; 32], Vec<TrustedKey>) {
         let seed = [7u8; 32];

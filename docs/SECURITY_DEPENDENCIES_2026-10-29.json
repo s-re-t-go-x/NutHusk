@@ -1,0 +1,390 @@
+{
+  "rust_packages": 469,
+  "rust_direct": [
+    {
+      "manifest": "crates/core/Cargo.toml",
+      "kind": "dependencies",
+      "name": "serde",
+      "requirement": "1",
+      "resolved": [
+        "1.0.229"
+      ]
+    },
+    {
+      "manifest": "crates/core/Cargo.toml",
+      "kind": "dependencies",
+      "name": "serde_json",
+      "requirement": "1",
+      "resolved": [
+        "1.0.154"
+      ]
+    },
+    {
+      "manifest": "crates/core/Cargo.toml",
+      "kind": "dependencies",
+      "name": "semver",
+      "requirement": "1",
+      "resolved": [
+        "1.0.28"
+      ]
+    },
+    {
+      "manifest": "crates/core/Cargo.toml",
+      "kind": "dependencies",
+      "name": "zip",
+      "requirement": "9",
+      "resolved": [
+        "9.1.3"
+      ]
+    },
+    {
+      "manifest": "crates/core/Cargo.toml",
+      "kind": "dependencies",
+      "name": "sha2",
+      "requirement": "0.10",
+      "resolved": [
+        "0.10.9"
+      ]
+    },
+    {
+      "manifest": "crates/core/Cargo.toml",
+      "kind": "dependencies",
+      "name": "ed25519-dalek",
+      "requirement": "2",
+      "resolved": [
+        "2.2.0"
+      ]
+    },
+    {
+      "manifest": "crates/core/Cargo.toml",
+      "kind": "dependencies",
+      "name": "base64",
+      "requirement": "0.22",
+      "resolved": [
+        "0.21.7",
+        "0.22.1",
+        "0.23.1"
+      ]
+    },
+    {
+      "manifest": "crates/core/Cargo.toml",
+      "kind": "dependencies",
+      "name": "tokio",
+      "requirement": "1",
+      "resolved": [
+        "1.54.1"
+      ]
+    },
+    {
+      "manifest": "crates/core/Cargo.toml",
+      "kind": "dependencies",
+      "name": "ureq",
+      "requirement": "2",
+      "resolved": [
+        "2.12.1"
+      ]
+    },
+    {
+      "manifest": "crates/core/Cargo.toml",
+      "kind": "dependencies",
+      "name": "url",
+      "requirement": "2",
+      "resolved": [
+        "2.5.8"
+      ]
+    },
+    {
+      "manifest": "crates/core/Cargo.toml",
+      "kind": "dependencies",
+      "name": "flate2",
+      "requirement": "1",
+      "resolved": [
+        "1.1.10"
+      ]
+    },
+    {
+      "manifest": "crates/core/Cargo.toml",
+      "kind": "dependencies",
+      "name": "tar",
+      "requirement": "0.4",
+      "resolved": [
+        "0.4.46"
+      ]
+    },
+    {
+      "manifest": "crates/core/Cargo.toml",
+      "kind": "dev-dependencies",
+      "name": "tokio",
+      "requirement": "1",
+      "resolved": [
+        "1.54.1"
+      ]
+    },
+    {
+      "manifest": "crates/cli/Cargo.toml",
+      "kind": "dependencies",
+      "name": "nuthusk-core",
+      "requirement": "path",
+      "resolved": [
+        "0.1.0"
+      ]
+    },
+    {
+      "manifest": "crates/cli/Cargo.toml",
+      "kind": "dependencies",
+      "name": "serde_json",
+      "requirement": "1",
+      "resolved": [
+        "1.0.154"
+      ]
+    },
+    {
+      "manifest": "crates/cli/Cargo.toml",
+      "kind": "dependencies",
+      "name": "url",
+      "requirement": "2",
+      "resolved": [
+        "2.5.8"
+      ]
+    },
+    {
+      "manifest": "crates/cli/Cargo.toml",
+      "kind": "dependencies",
+      "name": "rand_core",
+      "requirement": "0.6",
+      "resolved": [
+        "0.6.4"
+      ]
+    },
+    {
+      "manifest": "crates/cli/Cargo.toml",
+      "kind": "dev-dependencies",
+      "name": "zip",
+      "requirement": "9",
+      "resolved": [
+        "9.1.3"
+      ]
+    },
+    {
+      "manifest": "src-tauri/Cargo.toml",
+      "kind": "dependencies",
+      "name": "tauri",
+      "requirement": "2",
+      "resolved": [
+        "2.12.5"
+      ]
+    },
+    {
+      "manifest": "src-tauri/Cargo.toml",
+      "kind": "dependencies",
+      "name": "tauri-plugin-dialog",
+      "requirement": "2",
+      "resolved": [
+        "2.8.3"
+      ]
+    },
+    {
+      "manifest": "src-tauri/Cargo.toml",
+      "kind": "dependencies",
+      "name": "serde",
+      "requirement": "1",
+      "resolved": [
+        "1.0.229"
+      ]
+    },
+    {
+      "manifest": "src-tauri/Cargo.toml",
+      "kind": "dependencies",
+      "name": "serde_json",
+      "requirement": "1",
+      "resolved": [
+        "1.0.154"
+      ]
+    },
+    {
+      "manifest": "src-tauri/Cargo.toml",
+      "kind": "dependencies",
+      "name": "percent-encoding",
+      "requirement": "2",
+      "resolved": [
+        "2.3.2"
+      ]
+    },
+    {
+      "manifest": "src-tauri/Cargo.toml",
+      "kind": "dependencies",
+      "name": "nuthusk-core",
+      "requirement": "path",
+      "resolved": [
+        "0.1.0"
+      ]
+    },
+    {
+      "manifest": "src-tauri/Cargo.toml",
+      "kind": "build-dependencies",
+      "name": "tauri-build",
+      "requirement": "2",
+      "resolved": [
+        "2.7.4"
+      ]
+    }
+  ],
+  "npm_packages": [
+    {
+      "name": "@asamuzakjp/css-color",
+      "version": "3.2.0"
+    },
+    {
+      "name": "@csstools/color-helpers",
+      "version": "5.1.0"
+    },
+    {
+      "name": "@csstools/css-calc",
+      "version": "2.1.4"
+    },
+    {
+      "name": "@csstools/css-color-parser",
+      "version": "3.1.0"
+    },
+    {
+      "name": "@csstools/css-parser-algorithms",
+      "version": "3.0.5"
+    },
+    {
+      "name": "@csstools/css-tokenizer",
+      "version": "3.0.4"
+    },
+    {
+      "name": "agent-base",
+      "version": "7.1.4"
+    },
+    {
+      "name": "cssstyle",
+      "version": "4.6.0"
+    },
+    {
+      "name": "data-urls",
+      "version": "5.0.0"
+    },
+    {
+      "name": "debug",
+      "version": "4.4.3"
+    },
+    {
+      "name": "decimal.js",
+      "version": "10.6.0"
+    },
+    {
+      "name": "entities",
+      "version": "6.0.1"
+    },
+    {
+      "name": "html-encoding-sniffer",
+      "version": "4.0.0"
+    },
+    {
+      "name": "http-proxy-agent",
+      "version": "7.0.2"
+    },
+    {
+      "name": "https-proxy-agent",
+      "version": "7.0.6"
+    },
+    {
+      "name": "iconv-lite",
+      "version": "0.6.3"
+    },
+    {
+      "name": "is-potential-custom-element-name",
+      "version": "1.0.1"
+    },
+    {
+      "name": "jsdom",
+      "version": "26.1.0"
+    },
+    {
+      "name": "lru-cache",
+      "version": "10.4.3"
+    },
+    {
+      "name": "ms",
+      "version": "2.1.3"
+    },
+    {
+      "name": "nwsapi",
+      "version": "2.2.28"
+    },
+    {
+      "name": "parse5",
+      "version": "7.3.0"
+    },
+    {
+      "name": "punycode",
+      "version": "2.3.1"
+    },
+    {
+      "name": "rrweb-cssom",
+      "version": "0.8.0"
+    },
+    {
+      "name": "safer-buffer",
+      "version": "2.1.2"
+    },
+    {
+      "name": "saxes",
+      "version": "6.0.0"
+    },
+    {
+      "name": "symbol-tree",
+      "version": "3.2.4"
+    },
+    {
+      "name": "tldts",
+      "version": "6.1.86"
+    },
+    {
+      "name": "tldts-core",
+      "version": "6.1.86"
+    },
+    {
+      "name": "tough-cookie",
+      "version": "5.1.2"
+    },
+    {
+      "name": "tr46",
+      "version": "5.1.1"
+    },
+    {
+      "name": "w3c-xmlserializer",
+      "version": "5.0.0"
+    },
+    {
+      "name": "webidl-conversions",
+      "version": "7.0.0"
+    },
+    {
+      "name": "whatwg-encoding",
+      "version": "3.1.1"
+    },
+    {
+      "name": "whatwg-mimetype",
+      "version": "4.0.0"
+    },
+    {
+      "name": "whatwg-url",
+      "version": "14.2.0"
+    },
+    {
+      "name": "ws",
+      "version": "8.22.0"
+    },
+    {
+      "name": "xml-name-validator",
+      "version": "5.0.0"
+    },
+    {
+      "name": "xmlchars",
+      "version": "2.2.0"
+    }
+  ]
+}

@@ -104,7 +104,8 @@ async fn digest_ignores_zip_layout_and_resigning_replaces_old_signature() {
     sign_package(&folder, &s1, &test_seed(1));
     sign_package(&s1, &s2, &test_seed(1));
     let ar = zip::ZipArchive::new(fs::File::open(&s2).unwrap()).unwrap();
-    let sigs: Vec<_> = ar.file_names().filter(|n| n.ends_with("signature.json")).collect();
+    let names: Vec<_> = ar.file_names().collect::<Result<_, _>>().unwrap();
+    let sigs: Vec<_> = names.iter().filter(|n| n.ends_with("signature.json")).map(|n| n.as_ref()).collect();
     assert_eq!(sigs, ["pkg/signature.json"]);
     let m = manager_with_keys(&root, trusted(&test_seed(1), "官方"));
     assert_eq!(m.inspect_package(&s2).await.unwrap().trust.level, TrustLevel::Trusted);
@@ -128,6 +129,9 @@ async fn installed_plugin_is_trusted_and_tampering_after_install_is_detected() {
     fs::write(root.join("appdata/com.test.sig/ui.html"), "<script>evil()</script>").unwrap();
     m.scan();
     assert_eq!(m.list()[0].trust.level, TrustLevel::Invalid);
+    assert!(m.list()[0].error.as_deref().unwrap().contains("签名校验失败"));
+    assert!(m.plugin_dir("com.test.sig").is_none());
+    assert!(m.invoke("com.test.sig", "anything", serde_json::json!({})).await.unwrap_err().contains("签名校验失败"));
 
     // 恢复后重新变回可信；往目录里多放一个文件，或放进符号链接，都会被发现
     fs::write(root.join("appdata/com.test.sig/ui.html"), "<p>good</p>").unwrap();
@@ -172,4 +176,24 @@ fn garbage_signature_files_are_invalid_not_a_crash() {
     let id = signature::key_id_of(&signature::public_key_of_seed(&test_seed(1)));
     let wrong_sig = format!(r#"{{"version":1,"algorithm":"ed25519","keyId":"{id}","signature":"AAAA"}}"#);
     assert_eq!(signature::verify(Some(&wrong_sig), "a.b", "1.0.0", digest, &keys).level, TrustLevel::Invalid);
+}
+
+
+#[tokio::test]
+async fn backend_tampering_after_scan_is_blocked_before_execution() {
+    let root = tmp("sig-before-spawn");
+    let m = manager_with_keys(&root, trusted(&test_seed(1), "test"));
+    let (plain, signed) = (root.join("plain.nut"), root.join("signed.nut"));
+    backend_pkg(&plain, "com.test.signed-backend", "1.0.0");
+    sign_package(&plain, &signed, &test_seed(1));
+    let sha = m.inspect_package(&signed).await.unwrap().sha256;
+    m.install_package(&signed, &sha).await.unwrap();
+    let dir = root.join("appdata/com.test.signed-backend");
+    fs::write(dir.join("main.js"), "process.exit(91)").unwrap();
+    let err = m.invoke("com.test.signed-backend", "echo", serde_json::json!({})).await.unwrap_err();
+    assert!(err.contains("签名校验失败"), "{err}");
+    assert!(!m.list()[0].backend_running);
+    fs::remove_file(dir.join("signature.json")).unwrap();
+    let err = m.invoke("com.test.signed-backend", "echo", serde_json::json!({})).await.unwrap_err();
+    assert!(err.contains("签名校验失败"), "missing signature must not downgrade cached trust");
 }

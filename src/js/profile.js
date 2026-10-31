@@ -2,6 +2,7 @@ import { el, toast } from './util.js';
 import { showDialog } from './dialog.js';
 
 export const PROFILE_FORMAT = 'nuthusk-profile';
+const MAX_PROFILE_BYTES = 2 * 1024 * 1024;
 
 /**
  * 校验并解析 `.nutprofile` JSON 文本或对象。
@@ -9,20 +10,24 @@ export const PROFILE_FORMAT = 'nuthusk-profile';
 export function parseProfile(raw) {
   let obj = raw;
   if (typeof raw === 'string') {
+    if (new TextEncoder().encode(raw).length > MAX_PROFILE_BYTES) throw new Error('配置清单文件过大（上限 2 MB）');
     try {
       obj = JSON.parse(raw);
     } catch (err) {
       throw new Error(`不是有效的 JSON 格式：${err.message}`);
     }
   }
-  if (!obj || typeof obj !== 'object') {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
     throw new Error('配置清单内容无效');
   }
   if (obj.format !== PROFILE_FORMAT) {
     throw new Error(`不是有效的 NutHusk 配置清单（format 应为 ${PROFILE_FORMAT}）`);
   }
-  if (!obj.version || obj.version > 1) {
+  if (obj.version !== 1) {
     throw new Error(`不支持的配置清单版本 v${obj.version}（当前支持 v1）`);
+  }
+  for (const [key, limit] of [['sources', 50], ['plugins', 500], ['runtimes', 50]]) {
+    if (Array.isArray(obj[key]) && obj[key].length > limit) throw new Error('配置清单中的条目数量过多');
   }
   return {
     format: PROFILE_FORMAT,
@@ -85,7 +90,7 @@ function buildProfileConfirmBody(profile, diff) {
     summaryItems.push('应用外观、生命周期与目录优先级设置');
   }
   if (diff.newSources.length) {
-    summaryItems.push(`新增 ${diff.newSources.length} 个插件源：${diff.newSources.map((s) => s.name || s.url).join('、')}`);
+    summaryItems.push(`新增 ${diff.newSources.length} 个插件源：${diff.newSources.map((s) => `${s.name || '未命名源'}（${s.url}，由本次配置清单添加）`).join('、')}`);
   }
   if (diff.missingRuntimes.length) {
     summaryItems.push(`自动下载并配置 ${diff.missingRuntimes.length} 个便携运行环境：${diff.missingRuntimes.join('、')}`);
@@ -148,6 +153,7 @@ export async function applyProfile(rawProfile, { app, invoke, refresh, importPac
     ],
   });
   if (!ok) return false;
+  const failures = [];
 
   // 1. 恢复设置与目录顺序
   if (diff.hasSettings) {
@@ -156,6 +162,7 @@ export async function applyProfile(rawProfile, { app, invoke, refresh, importPac
       try {
         app.settings = { ...app.settings, ...(await invoke('patch_settings', { patch: restSettings })) };
       } catch (err) {
+        failures.push('设置');
         toast(`部分设置恢复失败：${err}`);
       }
     }
@@ -163,7 +170,7 @@ export async function applyProfile(rawProfile, { app, invoke, refresh, importPac
       try {
         app.dirs = await invoke('set_dir_order', { order: dirOrder });
         app.settings = { ...app.settings, dirOrder };
-      } catch { /* 忽略不兼容的目录顺序 */ }
+      } catch { failures.push('目录顺序'); }
     }
   }
 
@@ -172,6 +179,7 @@ export async function applyProfile(rawProfile, { app, invoke, refresh, importPac
     try {
       await invoke('source_add', { url: src.url, name: src.name || null });
     } catch (err) {
+      failures.push(`插件源 ${src.name || src.url}`);
       toast(`添加插件源「${src.name || src.url}」失败：${err}`);
     }
   }
@@ -183,6 +191,7 @@ export async function applyProfile(rawProfile, { app, invoke, refresh, importPac
       await invoke('runtime_install', { name: rtName });
       toast(`运行环境 ${rtName} 安装完成`);
     } catch (err) {
+      failures.push(`运行环境 ${rtName}`);
       toast(`运行环境 ${rtName} 安装失败：${err}`);
     }
   }
@@ -190,14 +199,18 @@ export async function applyProfile(rawProfile, { app, invoke, refresh, importPac
   // 4. 查找并下载缺失的插件包
   if (diff.missingPlugins.length > 0) {
     const allSources = await invoke('market_sources').catch(() => []);
-    const indexMap = new Map(); // pluginId -> { entry, sourceId }
+    allSources.sort((a, b) => Number(!!b.official) - Number(!!a.official));
+    const addedSourceUrls = new Set(diff.newSources.map((s) => s.url));
+    const indexMap = new Map(); // pluginId -> [{ entry, source }]
     for (const s of allSources) {
       try {
         const res = await invoke('market_index', { sourceId: s.id });
         const entries = res?.index?.entries ?? res?.index?.plugins ?? res?.entries ?? res?.plugins ?? [];
         for (const e of entries) {
-          if (e?.id && !indexMap.has(e.id)) {
-            indexMap.set(e.id, { entry: e, sourceId: s.id });
+          if (e?.id) {
+            const candidates = indexMap.get(e.id) ?? [];
+            candidates.push({ entry: e, source: s });
+            indexMap.set(e.id, candidates);
           }
         }
       } catch { /* 某个源拉取失败时继续尝试其他源 */ }
@@ -207,21 +220,49 @@ export async function applyProfile(rawProfile, { app, invoke, refresh, importPac
     const notFound = [];
 
     for (const want of diff.missingPlugins) {
-      const found = indexMap.get(want.id);
+      const candidates = indexMap.get(want.id) ?? [];
+      const found = candidates.find(({ entry }) => !want.version || entry.version === want.version);
       const url = want.url || found?.entry?.url;
-      const sha256 = want.sha256 || found?.entry?.sha256 || null;
-      const sourceId = want.url ? null : (found?.sourceId ?? null);
+      const sha256 = want.url ? (want.sha256 || null) : (found?.entry?.sha256 || null);
+      const source = want.url ? null : found?.source;
+      const sourceId = source?.id ?? null;
 
       if (!url) {
-        notFound.push(want.name || want.id);
+        notFound.push(`${want.name || want.id}${want.version ? `（需要版本 ${want.version}，未选择其他版本）` : ''}`);
         continue;
       }
 
+      if (!source?.official) {
+        const confirmed = await showDialog({
+          title: '确认配置清单的插件下载来源',
+          body: el('div', {},
+            el('p', { textContent: `插件：${want.name || want.id}${want.version ? ` / ${want.version}` : ''}` }),
+            el('p', { textContent: source
+              ? `私有插件源：${source.name || source.id}（${addedSourceUrls.has(source.url) ? '此源由本次配置清单添加' : '已配置的插件源'}）`
+              : '此下载地址由配置清单直接指定，不代表官方插件源。' }),
+            source ? el('p', { style: 'overflow-wrap: anywhere;', textContent: `插件源完整 URL：${source.url}` }) : null,
+            el('p', { style: 'overflow-wrap: anywhere;', textContent: `插件包完整 URL：${url}` }),
+            el('p', { textContent: '仅在信任此来源时继续。下载后仍需确认插件包权限与签名。' })),
+          buttons: [{ label: '跳过此插件', value: false }, { label: '确认来源并下载', value: true, primary: true }],
+        });
+        if (!confirmed) {
+          failures.push(`跳过插件 ${want.name || want.id}`);
+          continue;
+        }
+      }
+
       toast(`正在下载插件：${want.name || want.id}…`);
+      let tmpPath;
       try {
-        const tmpPath = await invoke('market_download', { url, sha256, sourceId });
+        tmpPath = await invoke('market_download', { url, sha256, sourceId });
+        const info = await invoke('inspect_plugin_package', { path: tmpPath });
+        if (info.manifest.id !== want.id || (want.version && info.manifest.version !== want.version)) {
+          throw new Error(`下载包的插件 ID 或版本与配置清单不符（需要 ${want.id}${want.version ? ` / ${want.version}` : ''}）`);
+        }
         downloadedItems.push({ path: tmpPath, name: `${want.name || want.id}.nut`, temp: true });
       } catch (err) {
+        failures.push(`插件 ${want.name || want.id}`);
+        if (tmpPath) await invoke('discard_dropped_package', { path: tmpPath }).catch(() => {});
         toast(`下载插件「${want.name || want.id}」失败：${err}`);
       }
     }
@@ -242,7 +283,7 @@ export async function applyProfile(rawProfile, { app, invoke, refresh, importPac
     if (cur && typeof want.enabled === 'boolean' && cur.enabled !== want.enabled) {
       try {
         await invoke('set_plugin_enabled', { id: want.id, enabled: want.enabled });
-      } catch { /* 忽略 */ }
+      } catch { failures.push(`插件状态 ${want.name || want.id}`); }
     }
   }
 
@@ -252,6 +293,17 @@ export async function applyProfile(rawProfile, { app, invoke, refresh, importPac
   }
 
   await refresh();
-  toast('已根据配置清单完成同步');
-  return true;
+  const incomplete = profile.plugins.flatMap((want) => {
+    const cur = app.plugins.find((p) => p.id === want.id);
+    if (!cur) return [`${want.name || want.id}（未安装）`];
+    if (want.version && cur.version !== want.version) {
+      return [`${want.name || want.id}（需要 ${want.version}，当前 ${cur.version}；保留当前版本）`];
+    }
+    return [];
+  });
+  const issues = [...failures, ...incomplete];
+  toast(issues.length
+    ? `配置清单部分同步，未完成：${issues.join('、')}`
+    : '已根据配置清单完成同步');
+  return issues.length === 0;
 }

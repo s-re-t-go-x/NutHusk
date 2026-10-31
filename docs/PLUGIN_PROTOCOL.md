@@ -11,20 +11,20 @@
 
 ## 快速上手（开发者 CLI 工具链）
 
-使用 `nuthusk-sign` CLI 工具可以一条命令生成插件模板、校验协议、命令行无头运行和打包：
+使用 `nuthusk-cli` 命令行工具可以一条命令生成插件模板、校验协议、命令行无头运行和打包：
 
 ```bash
 # 1. 生成插件脚手架（--lang 可选: js | python | rust | ui-only）
-cargo run -p nuthusk-sign -- new com.example.my-tool --lang js --name "我的工具"
+cargo run -p nuthusk-cli -- new com.example.my-tool --lang js --name "我的工具"
 
 # 2. 校验 plugin.json 并自动启动一次后端进程测试 stdin/stdout JSON-RPC 2.0 响应
-cargo run -p nuthusk-sign -- check ./my-tool
+cargo run -p nuthusk-cli -- check ./my-tool
 
 # 3. 在命令行无头运行插件声明的动作
-cargo run -p nuthusk-sign -- run ./my-tool transform --input "hello world"
+cargo run -p nuthusk-cli -- run ./my-tool transform --input "hello world"
 
 # 4. 打包为可安装的 .nut 插件包
-cargo run -p nuthusk-sign -- pack ./my-tool
+cargo run -p nuthusk-cli -- pack ./my-tool
 ```
 
 在桌面端开发调试插件时，打开插件标签页后点击工具顶栏的 **「重载」** 按钮（或按 **`Ctrl/Cmd + R`**），即可一键停止旧后端进程、重新读取 `plugin.json` 并刷新插件界面。
@@ -39,7 +39,7 @@ my-plugin/
   ui.html            可选：界面
   icon.svg           可选：图标（png / svg / jpg / webp / gif / ico）
   main.py …          可选：后端（任意语言）
-  signature.json     可选：签名（由 nuthusk-sign 生成，见 SIGNING.md）
+  signature.json     可选：签名（由 nuthusk-cli 生成，见 SIGNING.md）
 ```
 
 插件放进下面两个目录之一即可被读取，**两个目录里的插件地位相同**，不区分内置和用户安装：
@@ -50,6 +50,8 @@ my-plugin/
 | 程序目录 | 程序所在目录旁的 `nutPlugins` |
 
 同一个插件（`id` 相同）出现在两个目录里时，用优先级靠前的；默认 AppData 优先，可在设置里调整。新安装的插件装到靠前且可写的目录。
+
+插件的 `match.regex` 保留 JavaScript 正则语法，在宿主的隔离 Worker 中执行；单条表达式超过 150 ms 会被跳过，后续表达式继续匹配，避免阻塞工作台。前缀、长度和 JSON 识别仍即时执行。输入变化或关闭命令面板会取消旧匹配。
 
 ## plugin.json
 
@@ -119,7 +121,7 @@ my-plugin/
 
 ### actions（1.1 新增：无头动作与流水线）
 
-插件可在 `plugin.json` 中声明 `actions` 数组，使该插件能够被串联进宿主的「快捷流水线」或通过命令行 `nuthusk-sign run` 直接调用：
+插件可在 `plugin.json` 中声明 `actions` 数组，使该插件能够被串联进宿主的「快捷流水线」或通过命令行 `nuthusk-cli run` 直接调用：
 
 | 子字段 | 类型 | 说明 |
 |---|---|---|
@@ -229,7 +231,7 @@ Go、C#、Java、Shell 等同理：读一行、解析、写一行、刷新。
 <script src="/_sdk/ui.js"></script>
 ```
 
-- `/_sdk/ui.css`：跟随宿主的亮/暗主题，并给按钮、输入框等原生控件统一外观；提供 `.nh-page`、`.nh-toolbar`、`.nh-panes`、`.nh-pane`、`.nh-status` 等常用版式（参考 `nutPlugins/json-formatter/ui.html`）。
+- `/_sdk/ui.css`：跟随宿主的亮/暗主题，并给按钮、输入框等原生控件统一外观；提供 `.nh-page`、`.nh-toolbar`、`.nh-panes`、`.nh-pane`、`.nh-status` 等常用版式（参考 [NutHusk-Plugins 的 JSON 格式化插件](https://github.com/s-re-t-go-x/NutHusk-Plugins/tree/main/src/json-formatter)）。
 - `/_sdk/ui.js`：
   - `await nuthusk.call(method, params)` 调用自己的后端，返回后端的 `result`；后端返回 `error` 时抛出异常。
   - **（1.1 新增）** `nuthusk.onInput(function (text, meta) { ... })`：注册输入接收回调。当用户在 `Ctrl+K` 粘贴内容带入打开、拖入匹配后缀的文件，或从其他插件（及左侧分屏）投递内容过来时触发。若旧版 1.0 插件未注册 `onInput`，SDK 会自动将文本填入页面中的第一个主输入框（`<textarea>` 或 `<input>`）。
@@ -271,3 +273,7 @@ Go、C#、Java、Shell 等同理：读一行、解析、写一行、刷新。
 - `apiVersion` 用语义化版本范围。宿主 API 只会做加法，`1.x` 内不会破坏已有行为。
 - 想让插件在新旧版本宿主上都能用，保持 `^1.0.0` 即可。
 - 需要 1.1 的能力时，可写 `^1.0.0`（在 `ui.js` 中用 `if (nuthusk.onInput)` 渐进增强）或直接要求 `^1.1.0`。
+
+### 跨工具投递的宿主限制
+
+`sendTo` 仅接受当前活动标签或可见分屏的插件界面；后台界面的投递与快捷键消息会被忽略。宿主有模态对话框或投递面板时不接受新投递，所有来源共用 500 ms 的最小投递间隔。现有插件无需新增接收声明；投递仍只打开可用插件。此限制不改变正常的手动投递与分屏联动。

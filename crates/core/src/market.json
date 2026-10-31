@@ -1,0 +1,8 @@
+{
+  "name": "官方插件源",
+  "url": "https://raw.githubusercontent.com/s-re-t-go-x/NutHusk-Plugins/main/index.json",
+  "allowedHosts": [
+    "github.com",
+    "githubusercontent.com"
+  ]
+}

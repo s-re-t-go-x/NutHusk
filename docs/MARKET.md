@@ -9,9 +9,9 @@ NutHusk 提供了「插件下载」板块，用户可在界面中直接浏览、
 NutHusk 的插件获取机制遵循以下安全原则：
 
 1. **官方源白名单与签名验签**：
-   - 官方源默认指向 GitHub 仓库：`https://raw.githubusercontent.com/nuthusk/nuthusk-plugins/main/index.json`。
+   - 官方源的名称、索引地址和下载域名白名单统一维护在 `crates/core/src/market.json`（`name`、`url`、`allowedHosts`）。与 `runtimes.json` 一样，配置在编译时嵌入程序；修改后需要重新构建。
    - 官方源强制要求存在对应的 `index.json.sig` 签名文件，且签名必须由 `trusted_keys.json` 中配置的官方公钥签名。
-   - 官方源中列出的所有插件下载链接仅允许位于 `raw.githubusercontent.com` 或 `github.com` 官方组织下，且必须强制提供 SHA-256 哈希值。
+   - 索引、签名、插件包及其重定向地址均受 `allowedHosts` 限制（允许所列域名及其子域名），插件包必须提供 SHA-256。域名白名单不限制 GitHub 组织，来源真实性由签名保证。
 2. **私有源与手动直链**：
    - 支持用户添加自定义 HTTPS 源（私有 `index.json`）。私有源若未签名会标注为「未验证」，方便团队内部轻量分发。
    - 支持用户直接粘贴 `.nut` 插件包的 HTTPS 直链进行手动安装。
@@ -33,19 +33,45 @@ NutHusk 的插件获取机制遵循以下安全原则：
   "updated": "2026-10-25T12:00:00Z",
   "plugins": [
     {
-      "id": "com.example.hashcalc",
+      "id": "com.example.hash-calc",
       "name": "哈希计算",
       "version": "1.0.0",
       "description": "本地快速计算文本与文件的 MD5、SHA-1、SHA-256",
       "author": "NutHusk Team",
       "category": "开发",
-      "url": "https://raw.githubusercontent.com/nuthusk/nuthusk-plugins/main/plugins/hashcalc-1.0.0.nut",
+      "url": "https://raw.githubusercontent.com/nuthusk/nuthusk-plugins/main/plugins/hash-calc-1.0.0.nut",
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "size": 15420
     }
   ]
 }
 ```
+
+索引中的 `id` 必须与插件包内 `plugin.json` 的 `id` 完全一致，否则无法识别已安装状态。
+
+### 快速生成 index.json
+
+先构建 CLI：`cargo build --release -p nuthusk-cli`，将 `target/release/nuthusk-cli.exe` 加入 PATH，或直接使用完整路径运行。开发时也可将下列命令的 `nuthusk-cli` 替换成 `cargo run -p nuthusk-cli --`。
+
+将最终要发布的插件包集中放入一个目录，然后执行：
+
+```powershell
+nuthusk-cli index ./release/plugins --base-url https://example.com/plugins/ --name "团队插件源" --out ./release/index.json
+```
+
+- 自动读取包内 `plugin.json` 的 ID、名称、版本、描述和分类，计算最终文件的 SHA-256 与大小，并拼接下载地址，文件名中的空格等字符会自动编码。
+- `--base-url` 是这些插件包在服务器上的目录地址；只扫描本地目录第一层，不访问网络、不启动插件后端。
+- 每个插件 ID 只能保留一个最终发布包。签名后，应移走未签名的原包以及同 ID 的旧版本，再生成索引。
+- 可用 `--author "作者"` 为本批条目统一补充作者。索引条目按文件名排序。
+- 默认拒绝覆盖已有文件；确认完整重建时加 `--force`。已有的手工字段不会合并保留，`updated` 可自行补充。
+
+如需官方源签名，在所有编辑完成后执行：
+
+```powershell
+nuthusk-cli sign-index ./release/index.json --key ./my-signing-key.key
+```
+
+把 `index.json`、`index.json.sig` 和对应插件包一起发布。命令只生成配置文件，不自动上传或签名；官方源的下载地址还须满足 `market.json` 中的域名白名单。
 
 ### 字段说明
 
@@ -73,7 +99,7 @@ NutHusk 的插件获取机制遵循以下安全原则：
 
 ```bash
 # 1. 签名索引文件（使用已配置在 NutHusk 中的受信任私钥）
-nuthusk-sign sign-index index.json --key my-signing-key.key
+nuthusk-cli sign-index index.json --key my-signing-key.key
 # 生成 index.json.sig
 
 # 2. 将 index.json 和 index.json.sig 一同推送到官方仓库 main 分支
@@ -89,21 +115,17 @@ NutHusk 在拉取官方源时，会自动同级请求 `index.json.sig` 并利用
 ## 四、 插件打包与发布步骤
 
 1. **打包插件为 `.nut`**：
-   插件文件夹根目录下必须包含 `plugin.json`。将其打包为标准 zip 压缩包，并将扩展名命名为 `.nut`：
+   插件文件夹根目录下必须包含 `plugin.json`。直接用 `nuthusk-cli` 校验并打包为 `.nut`：
    ```bash
-   # Windows PowerShell
-   Compress-Archive -Path ./my-plugin/* -DestinationPath ./my-plugin-1.0.0.nut
+   nuthusk-cli pack ./my-plugin
    ```
 2. **对插件包签名**（可选但推荐）：
    ```bash
-   nuthusk-sign sign my-plugin-1.0.0.nut --key my-signing-key.key
+   nuthusk-cli sign my-plugin-1.0.0.nut --key my-signing-key.key
    ```
    签名后的插件包在用户导入时会标绿显示为「可信来源」。
-3. **计算哈希值**：
-   ```bash
-   certutil -hashfile my-plugin-1.0.0.signed.nut SHA256
-   ```
-4. **填入 `index.json`** 并更新版本清单，重新执行 `sign-index` 后提交推送。
+3. **自动生成索引**：将最终签名包放进发布目录，运行上文的 `nuthusk-cli index`，自动提取元数据并计算哈希及大小。
+4. **签名并发布**：如需验签，执行 `sign-index`；将插件包、索引和索引签名一起发布。
 
 ---
 
@@ -111,7 +133,7 @@ NutHusk 在拉取官方源时，会自动同级请求 `index.json.sig` 并利用
 
 NutHusk 内置支持在缺少环境时自动补全 Windows 下的精简版 Python 3.13 与各平台 Node.js。
 
-若需要支持其他语言（例如 Lua、AutoHotkey、Bun、Deno 等），可在用户配置目录下的 `nutConfig/runtimes.d/` 放置 JSON 配方文件（如 `lua.json`）：
+若需要支持其他语言执行环境（例如 Lua、AutoHotkey、Bun、Deno 等），可在用户配置目录下的 `nutConfig/runtimes.d/` 放置 JSON 配方文件（如 `lua.json`）：
 
 ```json
 {
@@ -132,5 +154,38 @@ NutHusk 内置支持在缺少环境时自动补全 Windows 下的精简版 Pytho
 }
 ```
 
-- **安装目录**：配置后的环境会下载至 `nutRuntimes/<name>`。
+- **安装目录**：配置后的环境会下载至 `nutRuntimes/<name>/<version>/`。
 - **动态隔离注入**：运行插件时，NutHusk 会自动将该目录加入子进程环境变量 `PATH` 最前端，既保证插件正常运行，又绝不篡改用户的全局系统环境。
+
+
+### 快速生成 runtimes.d/ 配方
+
+目录名是 **`runtimes.d/`**（带 `s`），位于 `nutConfig/` 下。先取得要发布的原始运行时压缩包或可执行文件，再生成配方：
+
+```powershell
+nuthusk-cli runtime-recipe lua --version 5.4.6 --file ./downloads/lua-5.4.6-win64.zip --url https://example.com/lua-5.4.6-win64.zip --bin lua.exe --platform windows-x86_64 --aliases lua54 --keep "lua.exe,lua54.dll" --out ./nutConfig/runtimes.d/lua.json
+```
+
+如果压缩包内多套了一层目录，例如 `lua-5.4.6/bin/lua.exe`，可以剥掉顶层目录：
+
+```powershell
+nuthusk-cli runtime-recipe lua --version 5.4.6 --file ./downloads/lua.zip --url https://example.com/lua.zip --bin bin/lua.exe --platform windows-x86_64 --strip-components 1 --keep "bin/*,lib/*" --out ./nutConfig/runtimes.d/lua.json
+```
+
+| 参数 | 用法 |
+| --- | --- |
+| `--file` | 已下载的本地文件，用于自动计算 SHA-256 和大小；命令不会下载或执行该文件。 |
+| `--url` | 用户实际下载的 HTTPS 地址，返回内容必须与本地文件逐字节相同。 |
+| `--bin` | 去掉 `stripComponents` 层目录后，可执行文件的相对路径，使用 `/`。 |
+| `--platform` | 默认当前平台；可选 `windows` / `linux` / `macos` 与 `x86_64` / `aarch64` 的组合。 |
+| `--archive` | 默认按本地文件名识别 `.zip`、`.tar.gz`、`.tgz`；其他文件视为单文件可执行程序。也可显式指定 `zip`、`tar.gz` 或 `file`。 |
+| `--strip-components` | 解压时移除的顶层目录层数，默认 `0`。 |
+| `--keep` | 逗号分隔的保留文件或目录前缀，如 `bin/*,LICENSE`；省略则保留全部。 |
+| `--aliases` | 逗号分隔的命令别名，如 `lua54,lua5.4`。 |
+| `--description` | 可选的运行环境说明。 |
+| `--out` | 默认输出当前目录的 `<名字>.json`；可以指定实际配置目录，父目录会自动创建。 |
+| `--force` | 覆盖已有配方，完整重建文件。 |
+
+配方生成时会校验 HTTPS、字段格式和相对路径，但不会解压检查 `bin` 是否存在；请根据实际压缩包布局填写 `--bin`、`--strip-components` 和 `--keep`。单文件模式应使用 `--archive file`，`--bin` 只能是文件名；不支持把 `.msi`、`.7z` 等安装包直接当作运行时解压。
+
+命令一次生成一个平台的配方。多平台发布时分别指定不同的 `--out`，再把各自的 `platforms` 条目合并到同一份 JSON 中；不要用 `--force` 期待自动合并。将最终文件放入设置页所列数据目录下的 `nutConfig/runtimes.d/` 即可，无需重新编译。运行环境实际安装在 `nutRuntimes/<name>/<version>/`。

@@ -18,7 +18,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-/// 后端因缺少运行时无法启动时，错误字符串以它开头，后面是 `RuntimeMissing` 的 JSON。
+/// 旧客户端使用的错误前缀；宿主 IPC 已改用结构化 InvokeError，不再解析此字符串。
 pub const MISSING_PREFIX: &str = "RuntimeMissing:";
 
 const BUILTIN_RECIPES: &str = include_str!("runtimes.json");
@@ -83,9 +83,7 @@ pub fn platform_key() -> String {
 }
 
 fn safe_rel(p: &str) -> bool {
-    !p.is_empty()
-        && !p.contains('\\')
-        && Path::new(p).components().all(|c| matches!(c, Component::Normal(_)))
+    !p.contains('\\') && crate::manifest::is_safe_relative(p)
 }
 
 fn simple_token(s: &str) -> bool {
@@ -95,10 +93,10 @@ fn simple_token(s: &str) -> bool {
 impl Recipe {
     pub fn validate(&self) -> Result<(), String> {
         let ctx = |m: String| format!("运行时配方「{}」无效: {m}", self.name);
-        if !simple_token(&self.name) || self.name.starts_with('.') {
+        if !simple_token(&self.name) || self.name.starts_with('.') || !safe_rel(&self.name) {
             return Err(ctx("名字只能包含字母、数字、. - _ +".into()));
         }
-        if !simple_token(&self.version) {
+        if !simple_token(&self.version) || !safe_rel(&self.version) {
             return Err(ctx("版本号只能包含字母、数字、. - _ +".into()));
         }
         if self.aliases.iter().any(|a| !simple_token(a)) {
@@ -166,7 +164,7 @@ struct Meta {
     path_dirs: Vec<String>,
 }
 
-/// 缺少运行时的详细信息，序列化后放在 `MISSING_PREFIX` 后面。
+/// 由宿主运行时解析生成的缺失信息，作为结构化错误的 detail 传递。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeMissing {
@@ -537,7 +535,9 @@ fn stripped(raw: &Path, n: usize) -> Result<Option<String>, String> {
     if parts.len() <= n {
         return Ok(None);
     }
-    Ok(Some(parts[n..].join("/")))
+    let rel = parts[n..].join("/");
+    if !safe_rel(&rel) { return Err(format!("压缩包含不安全的路径: {}", raw.display())); }
+    Ok(Some(rel))
 }
 
 fn write_entry(reader: &mut impl Read, out: &Path, total: &mut u64) -> Result<(), String> {
@@ -571,7 +571,11 @@ fn extract_zip(src: &Path, dest: &Path, p: &PlatformRecipe) -> Result<(), String
     let mut total = 0u64;
     for i in 0..ar.len() {
         let mut f = ar.by_index(i).map_err(|e| e.to_string())?;
-        let name = f.enclosed_name().ok_or_else(|| format!("压缩包含不安全的路径: {}", f.name()))?;
+        let entry_name = f.name().map_err(|e| format!("压缩包文件名无法解析: {e}"))?.into_owned();
+        if !safe_rel(entry_name.trim_end_matches('/')) {
+            return Err(format!("压缩包含不安全的路径: {entry_name}"));
+        }
+        let name = f.enclosed_name().ok_or_else(|| format!("压缩包含不安全的路径: {entry_name}"))?;
         let Some(rel) = stripped(&name, p.strip_components)? else { continue };
         if f.is_dir() || rel.is_empty() || !kept(&p.keep, &rel) {
             continue;
@@ -670,6 +674,9 @@ mod tests {
         assert!(r.validate().is_ok());
         r.name = "../evil".into();
         assert!(r.validate().is_err());
+        let (mut bad_version, _) = recipe(Archive::Zip, "a.exe", 0, &[]);
+        bad_version.version = "..".into();
+        assert!(bad_version.validate().is_err());
         let (mut r, _) = recipe(Archive::Zip, "../a.exe", 0, &[]);
         assert!(r.validate().is_err());
         r.platforms.values_mut().for_each(|p| p.bin = "a.exe".into());

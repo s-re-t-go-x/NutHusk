@@ -163,6 +163,7 @@ export async function importDroppedFiles(
   if (busy) return toast('正在导入，请先完成当前这个');
   const profileFile = files.find((f) => /\.nutprofile$/i.test(f.name));
   if (profileFile && onImportProfile) {
+    if (profileFile.size > 2 * 1024 * 1024) return toast('配置清单文件过大（上限 2 MB）');
     try {
       const text = await readText(profileFile);
       await onImportProfile(text);

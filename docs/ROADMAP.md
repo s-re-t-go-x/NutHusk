@@ -1,6 +1,6 @@
-# NutHusk 功能演进路线图与开发进度（AI 续接交接文档）
+# NutHusk 功能演进路线图与架构归档（已收官）
 
-> **致后续会话的 AI 助手**：本文档记录了 NutHusk 的核心设计约束、已完成功能（P0、P1、P2）的实现细节，以及尚未开发的 **P3 阶段计划**。接手新任务时，请先阅读本文档以快速对齐上下文。
+> **致后续会话的 AI 助手**：本文档记录了 NutHusk 的核心设计约束、已完成并收官的全部阶段（P0、P1、P2）实现细节，以及关于隐私无痕设计的最终决策。接手新任务时，请先阅读本文档以快速对齐上下文。
 
 ---
 
@@ -10,18 +10,21 @@
    - 插件界面运行在 `sandbox="allow-scripts"` 的无同源权限 `iframe` 中，只能通过 `/_sdk/ui.js` 的 `postMessage` 与宿主通信。
    - 插件后端为任意语言的独立子进程，通过 `stdin/stdout` 进行单行 JSON-RPC 2.0 通信（懒启动，按需拉起）。
    - 宿主 API 当前版本为 **`1.1.0`**（`crates/core/src/manifest.rs` 中的 `HOST_API_VERSION`），必须保持对 `^1.0.0` 插件的向后兼容。
-2. **键鼠双轨交互（Dual-Track UX）**：
+2. **业务数据 100% 内存无痕（Zero-Trace Privacy）**：
+   - 用户在任何工具或流水线中输入、格式化、转换、计算的文本及文件内容，**严禁在宿主磁盘或 `localStorage` 中持久化留存**，全部仅在内存中流转，关闭标签或退出程序即销毁。
+   - 宿主仅保存配置状态（设置、启用状态、收藏、工作区布局、流水线步骤定义）及最近打开过的工具 ID 列表（`nuthusk.recent`，并在「设置 → 首页」及「最近使用」页提供一键「清空记录」按钮）。
+3. **键鼠双轨交互（Dual-Track UX）**：
    - 每个核心功能必须同时兼顾**鼠标党**（可视按钮、右键/中键、拖拽排序、拖入文件直达）与**键盘党**（`Ctrl+K` 命令面板、`Ctrl+\` 分屏、`Ctrl+R` 热重载、`Ctrl+Enter` 执行、自动聚焦输入框）。
-3. **不做桌面悬浮球与贴边自动收起**：
+4. **不做桌面悬浮球与贴边自动收起**：
    - 已明确决策：不做遮挡视线、易与多显示器冲突的桌面悬浮球或贴边隐藏；采用**系统托盘常驻 + 顶栏窗口置顶（Pin）+ 快捷键唤起**代替。
-4. **测试与环境注意事项**：
-   - Rust 测试：`cargo test -p nuthusk-core -p nuthusk-sign`
+5. **测试与环境注意事项**：
+   - Rust 测试：`cargo test -p nuthusk-core -p nuthusk-cli`
    - 前端测试：`node --test tests/*.test.js`（注意：`package.json` 位于 `tests/` 目录下，根目录无 `package.json`；在 Windows PowerShell 下若用 npm 请执行 `npm.cmd --prefix tests test`）。
    - `tests/settings.smoke.test.js` 强校验设置页的 6 个分区标题顺序：`['外观', '首页', '文件位置', '运行环境', '安全', '关于']`，新增设置项请放入这 6 个现有分区中，不要轻易改动一级分区标题。
 
 ---
 
-## 二、已完成阶段（P0、P1 & P2）
+## 二、已完成阶段（P0、P1 & P2 全量收官）
 
 ### ✅ P0：操作手感打磨 + 后台进程透视管控 + 托盘常驻（已完成并验证）
 
@@ -53,7 +56,7 @@
 ### ✅ P2：开发者工具链 + 无界面动作与快捷流水线 + 场景工作区（已完成并验证）
 
 - **插件开发者工具链（CLI + 宿主热重载）**：
-  - `crates/core/src/devkit.rs` & `crates/sign/src/main.rs`：新增 `new <id> [--lang js|python|rust|ui-only]`、`check <插件目录>`（含静态校验与后端进程 JSON-RPC 2.0 探针测试）、`pack <插件目录>`（打包并校验 `.nut`）及 `run <插件目录> <动作>`（命令行无头运行插件动作）。
+  - `crates/core/src/devkit.rs` & `crates/cli/src/main.rs`：新增 `new <id> [--lang js|python|rust|ui-only]`、`check <插件目录>`（含静态校验与后端进程 JSON-RPC 2.0 探针测试）、`pack <插件目录>`（打包并校验 `.nut`）及 `run <插件目录> <动作>`（命令行无头运行插件动作）。
   - `crates/core/src/manager.rs` & `src/js/main.js`：新增 `reload_single_plugin` 命令，工具顶栏提供「重载」按钮（快捷键 `Ctrl/Cmd + R`），支持一键停止旧后端、重新读取 `plugin.json` 并加时间戳刷新插件 `iframe`。
 - **无界面动作（`ActionSpec` + `nuthusk.onAction`）与快捷流水线组合（Workflows）**：
   - `crates/core/src/manifest.rs`：新增 `ActionSpec`（`id`, `name`, `method`, `description`, `defaultParams`），在 `PluginInfo` 中暴露 `actions`。
@@ -64,13 +67,7 @@
 
 ---
 
-## 三、待完成阶段（P3 计划）
+## 三、已归档决策（原 P3 计划不纳入）
 
-### ⏳ P3：数据沉淀与深水区安全（远期规划）
-
-1. **工具输入历史与常用片段收藏（Input History & Snippets）**
-   - **目标**：每个插件工具自动记录最近处理过的非敏感输入历史，支持在工具顶栏或快捷键下拉回填，支持将高频测试数据（如常用测试 Token、示例 JSON、正则模板）收藏为固定片段（Snippets）。
-   - **注意**：需提供一键清空历史与按插件关闭记录的隐私开关。
-
-2. **运行时权限弹窗与进程级沙箱探索（Runtime Permission Prompt & Sandboxing）**
-   - **目标**：将目前仅作声明的 `clipboard` / `fs.read` / `fs.write` 逐步升级为受控宿主 API（调用时弹出「允许一次 / 始终允许 / 拒绝」并记录活动日志），并探索对带后端插件的操作系统级受限令牌/沙箱隔离或 WASI 后端支持。
+- **原 P3-1（工具输入历史自动记录）**：经评估，自动记录用户输入历史会违背「业务数据零落盘、敏感内容无痕处理」的核心隐私优势，决定**不予纳入**；并为仅存的「最近打开工具 ID 记录（`nuthusk.recent`）」补齐了一键「清空记录」入口。
+- **原 P3-2（应用层权限弹窗与重度 OS 沙箱）**：前端已通过无同源 `sandbox="allow-scripts"` 与 CSP 默认禁网实现硬隔离，插件安装前已有 Ed25519 签名校验、SHA-256 校验与风险确认弹窗，保持现有轻量进程架构，不做过度复杂化。

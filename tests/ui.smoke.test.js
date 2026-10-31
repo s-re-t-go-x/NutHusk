@@ -240,6 +240,11 @@ test('开发热重载（Ctrl+R）、保存/切换场景工作区与快捷流水�
   // 模拟前端插件 JSON 格式化处理 action 消息
   jsonFrame.contentWindow.postMessage = (msg) => {
     if (msg.type === 'action') {
+      const otherFrame = $$('iframe.frame').find((f) => f !== jsonFrame);
+      window.dispatchEvent(new window.MessageEvent('message', {
+        data: { type: 'actionResult', reqId: msg.reqId, result: 'forged' },
+        source: otherFrame.contentWindow,
+      }));
       window.dispatchEvent(new window.MessageEvent('message', {
         data: { type: 'actionResult', reqId: msg.reqId, result: '{\n  "ok": 1\n}' },
         source: jsonFrame.contentWindow,
@@ -255,6 +260,7 @@ test('开发热重载（Ctrl+R）、保存/切换场景工作区与快捷流水�
   await tick(50);
   const runnerOutput = $$('.wf-runner textarea')[1];
   assert.equal(runnerOutput.value, 'RESULT:hash');
+  assert.equal(m.called('plugin_call').at(-1)[1].params.text, '{\n  "ok": 1\n}', '其他插件不能伪造动作回包');
 
   // 4. 在流水线弹窗内点击「投递到工具…」：按 Esc 仅关闭投递面板而不关闭流水线弹窗；选择目标工具后自动关闭流水线弹窗并打开目标工具
   const sendBtn = $$('.wf-actions-bar .btn').find((b) => b.textContent.includes('投递到工具'));
@@ -292,6 +298,9 @@ test('快捷键：Ctrl+数字切换、Ctrl+W 关闭并移除 iframe、首页不�
   assert.equal($$('.tab').length, 2, '首页不会被关掉');
 
   const frame = $$('iframe.frame')[0];
+  window.dispatchEvent(new window.MessageEvent('message', { data: { type: 'key', key: 'k', ctrlKey: true }, source: frame.contentWindow }));
+  assert.equal($$('.pal-overlay').length, 0, '后台 iframe 不得弹出宿主面板');
+  key(window, '2', { ctrlKey: true });
   window.dispatchEvent(new window.MessageEvent('message', { data: { type: 'key', key: 'k', ctrlKey: true }, source: frame.contentWindow }));
   assert.equal($$('.pal-overlay').length, 1);
   key(document.querySelector('.pal-input'), 'Escape');

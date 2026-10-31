@@ -4,6 +4,7 @@ import { renderHome } from './home.js';
 import { renderManage } from './manage.js';
 import { renderSettings } from './settings.js';
 import { renderDownload, createDownloadState } from './download.js';
+import { createDownloadActions } from './download-actions.js';
 import { openPalette } from './palette.js';
 import { showDialog, isDialogOpen, closeActiveDialog } from './dialog.js';
 import { importPackages, importDroppedFiles } from './importer.js';
@@ -11,6 +12,7 @@ import { applyProfile } from './profile.js';
 import { openWorkflowRunner, openWorkflowBuilder, promptSaveWorkspace } from './workflow.js';
 
 const { invoke } = window.__TAURI__.core;
+const errorMessage = (err) => err && typeof err === 'object' && typeof err.message === 'string' ? err.message : String(err);
 const { HOME, DOWNLOAD, MANAGE, SETTINGS } = S;
 const isPage = (id) => id === HOME || id === DOWNLOAD || id === MANAGE || id === SETTINGS;
 const PAGE_TABS = {
@@ -140,7 +142,7 @@ async function executePluginAction(p, act, inputText) {
 
   if (p.hasBackend) {
     const wasRunning = !!p.backendRunning;
-    const res = await invoke('plugin_call', { id: p.id, method, params });
+    const res = await invoke('plugin_call', { id: p.id, method, params }).catch((err) => { throw new Error(errorMessage(err)); });
     if (!wasRunning) await syncPluginStates();
     return res;
   }
@@ -156,7 +158,7 @@ async function executePluginAction(p, act, inputText) {
       app.pendingActions.delete(reqId);
       reject(new Error(`插件「${p.name}」执行动作超时`));
     }, 8000);
-    app.pendingActions.set(reqId, { resolve, reject, timer });
+    app.pendingActions.set(reqId, { pluginId: p.id, resolve, reject, timer });
     frame.contentWindow?.postMessage({ type: 'action', reqId, method, params }, '*');
   });
 }
@@ -247,6 +249,16 @@ function switchToWorkspaceLayout(ws) {
       }
     }
   }
+  const nextActive = typeof ws.active === 'string' && targetTabs.has(ws.active) ? ws.active : HOME;
+  let nextSplitId = null;
+  if (typeof ws.splitId === 'string' && ws.splitId !== nextActive) {
+    const sp = byId(ws.splitId);
+    if (isUsable(sp) && sp.ui) {
+      targetTabs.add(ws.splitId);
+      if (!app.frames.has(ws.splitId)) createFrame(sp);
+      nextSplitId = ws.splitId;
+    }
+  }
   // 关闭不在目标场景中的工具标签
   for (const existingId of [...app.tabs]) {
     if (existingId !== HOME && !targetTabs.has(existingId)) {
@@ -254,17 +266,9 @@ function switchToWorkspaceLayout(ws) {
     }
   }
   app.tabs = [...targetTabs];
-  app.active = typeof ws.active === 'string' && app.tabs.includes(ws.active) ? ws.active : HOME;
-  app.splitId = null;
-  if (typeof ws.splitId === 'string' && ws.splitId !== app.active) {
-    const sp = byId(ws.splitId);
-    if (isUsable(sp) && sp.ui) {
-      app.tabs = S.openTab(app.tabs, ws.splitId);
-      if (!app.frames.has(ws.splitId)) createFrame(sp);
-      app.splitId = ws.splitId;
-    }
-  }
-  renderAll();
+  app.active = nextActive;
+  app.splitId = nextSplitId;
+  activate(app.active);
 }
 
 function restoreWorkspace(ws) {
@@ -286,6 +290,7 @@ function restoreWorkspace(ws) {
 }
 
 function dropTab(id) {
+  const p = isPage(id) ? null : byId(id);
   const r = S.closeTab(app.tabs, app.active, id);
   app.tabs = r.tabs;
   app.active = r.active;
@@ -294,15 +299,14 @@ function dropTab(id) {
   app.frames.delete(id);
   app.loadedFrames.delete(id);
   app.pendingInputs.delete(id);
-}
-
-function closeTab(id) {
-  const p = isPage(id) ? null : byId(id);
-  dropTab(id);
-  activate(app.active);
   if (p && p.hasBackend && app.settings.stopOnClose) {
     invoke('stop_plugin_backend', { id }).then(() => syncPluginStates()).catch(() => {});
   }
+}
+
+function closeTab(id) {
+  dropTab(id);
+  activate(app.active);
 }
 
 function activate(id) {
@@ -606,6 +610,16 @@ const actions = {
     app.favorites = S.toggleItem(app.favorites, id);
     S.saveList(localStorage, 'nuthusk.favorites', app.favorites);
     renderAll();
+  },
+
+  clearRecent() {
+    app.recent = [];
+    try {
+      localStorage.removeItem('nuthusk.recent');
+      localStorage.removeItem('toolbox.recent');
+    } catch { /* 忽略 */ }
+    renderAll();
+    toast('已清空最近使用记录');
   },
 
   async setEnabled(id, enabled) {
@@ -954,103 +968,13 @@ const actions = {
     }
   },
 
-  async loadMarketSources() {
-    try {
-      app.downloadState.sources = await invoke('market_sources');
-      if (!app.downloadState.sources.some((s) => s.id === app.downloadState.selectedSource)) {
-        app.downloadState.selectedSource = app.downloadState.sources[0]?.id ?? 'official';
-      }
-      await actions.loadMarketSource(app.downloadState.selectedSource);
-    } catch (err) {
-      toast(`加载插件源失败：${err}`);
-    }
-  },
-
-  async loadMarketSource(id) {
-    app.downloadState.selectedSource = id;
-    app.downloadState.loading = true;
-    app.downloadState.error = null;
-    if (app.active === DOWNLOAD) renderAll();
-    try {
-      const res = await invoke('market_index', { sourceId: id });
-      app.downloadState.index = res.index ?? { name: res.name, entries: res.entries ?? res.plugins ?? [] };
-      app.downloadState.trust = res.trust;
-      app.downloadState.fromCache = !!res.fromCache;
-      app.downloadState.error = res.error ?? null;
-    } catch (err) {
-      app.downloadState.error = String(err);
-      toast(`获取插件索引失败：${err}`);
-    } finally {
-      app.downloadState.loading = false;
-      if (app.active === DOWNLOAD) renderAll();
-    }
-  },
-
-  async addSource(url, name) {
-    try {
-      await invoke('source_add', { url, name });
-      toast('已添加插件源');
-      await actions.loadMarketSources();
-    } catch (err) {
-      toast(`添加失败：${err}`);
-    }
-  },
-
-  async removeSource(id) {
-    try {
-      await invoke('source_remove', { id });
-      toast('已删除插件源');
-      await actions.loadMarketSources();
-    } catch (err) {
-      toast(`删除失败：${err}`);
-    }
-  },
-
-  async installFromMarket(entry) {
-    const key = `pkg:${entry.url}`;
-    app.downloadState.downloading.set(key, { downloaded: 0, total: entry.size || 0 });
-    if (app.active === DOWNLOAD) renderAll();
-    try {
-      const tmpPath = await invoke('market_download', {
-        url: entry.url,
-        sha256: entry.sha256,
-        sourceId: app.downloadState.selectedSource,
-      });
-      app.downloadState.downloading.delete(key);
-      if (app.active === DOWNLOAD) renderAll();
-      await importPackages([tmpPath], { invoke, refresh });
-    } catch (err) {
-      app.downloadState.downloading.delete(key);
-      if (app.active === DOWNLOAD) renderAll();
-      toast(`下载插件失败：${err}`);
-    }
-  },
-
-  async installDirect(url) {
-    const key = `pkg:${url}`;
-    app.downloadState.downloading.set(key, { downloaded: 0, total: 0 });
-    if (app.active === DOWNLOAD) renderAll();
-    try {
-      const tmpPath = await invoke('market_download', { url });
-      app.downloadState.downloading.delete(key);
-      if (app.active === DOWNLOAD) renderAll();
-      await importPackages([tmpPath], { invoke, refresh });
-    } catch (err) {
-      app.downloadState.downloading.delete(key);
-      if (app.active === DOWNLOAD) renderAll();
-      toast(`下载插件失败：${err}`);
-    }
-  },
-
-  async cancelDownload(key) {
-    try {
-      await invoke('download_cancel', { key });
-      app.downloadState.downloading.delete(key);
-      if (app.active === DOWNLOAD) renderAll();
-    } catch (err) {
-      toast(`取消失败：${err}`);
-    }
-  },
+  ...createDownloadActions({
+    state: app.downloadState,
+    invoke,
+    render: () => { if (app.active === DOWNLOAD) renderAll(); },
+    importPackages,
+    refresh,
+  }),
 };
 
 /* ---------- 快捷键与投递面板 ---------- */
@@ -1075,9 +999,17 @@ function showPalette(extra = {}) {
   });
 }
 
+let lastSendTo = -Infinity;
 function handleSendTo(sourceId, text, targetId = null) {
+  const sourceFrame = app.frames.get(sourceId);
+  if (!sourceFrame || !(sourceFrame.classList.contains('active') || sourceFrame.classList.contains('split'))) return;
+  if (isDialogOpen() || document.querySelector('.pal-overlay')) return;
+  const now = performance.now();
+  if (now - lastSendTo < 500) return; // Shared limit: switching source frames cannot bypass it.
+  if (targetId !== null && (typeof targetId !== 'string' || !isUsable(byId(targetId)))) return;
   const s = String(text ?? '');
   if (!s.trim()) return toast('没有可投递的内容');
+  lastSendTo = now;
   const srcPlugin = byId(sourceId);
   const payload = { text: s, sourceId, sourceName: srcPlugin?.name ?? sourceId };
   if (targetId) {
@@ -1208,7 +1140,7 @@ async function handleRuntimeMissing(pluginId, reqData, frame, info) {
     await syncPluginStates();
     return true;
   } catch (retryErr) {
-    frame.contentWindow?.postMessage({ reqId: reqData.reqId, error: String(retryErr) }, '*');
+    frame.contentWindow?.postMessage({ reqId: reqData.reqId, error: errorMessage(retryErr) }, '*');
     await syncPluginStates();
     return true;
   }
@@ -1240,11 +1172,14 @@ window.addEventListener('message', async (e) => {
   const [id, frame] = entry;
   const d = e.data ?? {};
 
-  if (d.type === 'key') { handleShortcut(d); return; } // SDK 转发的快捷键（焦点在插件内时）
+  if (d.type === 'key') {
+    if (frame.classList.contains('active') || frame.classList.contains('split')) handleShortcut(d);
+    return;
+  } // SDK 转发的快捷键（焦点在插件内时）
   if (d.type === 'sendTo') { handleSendTo(id, d.text, d.targetId ?? null); return; } // 插件投递数据到其他工具
   if (d.type === 'actionResult') {
     const pending = app.pendingActions.get(d.reqId);
-    if (pending) {
+    if (pending && pending.pluginId === id) {
       app.pendingActions.delete(d.reqId);
       clearTimeout(pending.timer);
       if (d.error) pending.reject(new Error(d.error));
@@ -1260,17 +1195,10 @@ window.addEventListener('message', async (e) => {
     frame.contentWindow?.postMessage({ reqId: d.reqId, result }, '*');
     if (!wasRunning) await syncPluginStates();
   } catch (err) {
-    const errStr = String(err);
-    const rmIdx = errStr.indexOf('RuntimeMissing:');
-    if (rmIdx >= 0) {
-      let missingInfo = null;
-      try {
-        missingInfo = JSON.parse(errStr.slice(rmIdx + 'RuntimeMissing:'.length));
-      } catch { /* 容忍解析错误 */ }
-      if (missingInfo) {
-        const handled = await handleRuntimeMissing(id, d, frame, missingInfo);
-        if (handled) return;
-      }
+    const errStr = errorMessage(err);
+    if (err?.code === 'RUNTIME_MISSING' && err.detail && typeof err.detail === 'object') {
+      const handled = await handleRuntimeMissing(id, d, frame, err.detail);
+      if (handled) return;
     }
     frame.contentWindow?.postMessage({ reqId: d.reqId, error: errStr }, '*');
     if (!wasRunning) await syncPluginStates();

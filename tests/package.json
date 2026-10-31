@@ -2,7 +2,7 @@
   "name": "toolbox-ui-tests",
   "private": true,
   "type": "module",
-  "description": "仅用于壳界面的测试，不参与打包。在 tests 目录下执行 npm install && npm test",
+  "description": "宿主界面测试，不参与打包，也不依赖插件仓库。在 tests 目录下执行 npm ci && npm test",
   "scripts": { "test": "node --test \"*.test.js\"" },
   "devDependencies": { "jsdom": "^26.0.0" }
 }
